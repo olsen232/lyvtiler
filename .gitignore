@@ -1,0 +1,7 @@
+target/
+# The symlink build.sh drops here, pointing into target/.
+/lyv
+*.mbtiles
+*.pmtiles
+.DS_Store
+__pycache__/

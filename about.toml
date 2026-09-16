@@ -1,0 +1,28 @@
+# Which licenses may appear in the dependency graph.
+#
+# Listed in preference order: where a crate offers a choice — and 115 of them
+# offer "MIT OR Apache-2.0" — cargo-about takes the first match, so MIT is
+# first and the attribution file stays as short as the graph allows.
+#
+# A license arriving that is not on this list is an error rather than a silent
+# addition, which is the point of the file: `cargo about generate` fails, and
+# the new obligation gets a decision rather than a default.
+# Our own crates are not third-party and are not on crates.io, so they are
+# left out rather than listed against a registry page that does not exist.
+private = { ignore = true }
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    # The ICU data tables, pulled in transitively by the GeoParquet reader.
+    "Unicode-3.0",
+    # A public-domain dedication rather than a license, on a build dependency.
+    "CC0-1.0",
+]

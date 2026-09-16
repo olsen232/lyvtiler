@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>lyv viewer</title>
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pmtiles@3.2.0/dist/pmtiles.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; }
+    html, body, #map { height: 100%; }
+
+    #hud {
+      position: absolute; top: 10px; left: 10px; z-index: 10;
+      background: rgba(255,255,255,0.94); color: #222;
+      padding: 10px 12px; border-radius: 6px; max-width: 22rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.28);
+    }
+    #hud h1 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+    #hud dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; }
+    #hud dt { color: #666; }
+    #hud dd { margin: 0; font-variant-numeric: tabular-nums; }
+    #hud label { display: block; margin-top: 8px; color: #444; }
+    #hud button {
+      margin-top: 8px; font: inherit; padding: 3px 8px; border-radius: 4px;
+      border: 1px solid #bbb; background: #f7f7f7; cursor: pointer;
+    }
+    #hud button:hover { background: #eee; }
+      #picked {
+      position: absolute; bottom: 10px; left: 10px; z-index: 10;
+      background: rgba(255,255,255,0.94); color: #222;
+      padding: 8px 10px; border-radius: 6px; max-width: 26rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.28); display: none;
+      white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px;
+    }
+    #error {
+      position: absolute; inset: 0; display: none; place-content: center;
+      padding: 2rem; background: #fff; color: #900; font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="hud">
+  <h1 id="title">loading…</h1>
+  <dl>
+    <dt>layer</dt><dd id="layer">—</dd>
+    <dt>zoom</dt><dd id="zoom">—</dd>
+    <dt>zooms</dt><dd id="zooms">—</dd>
+    <dt>features</dt><dd id="count">—</dd>
+    <dt>geometry</dt><dd id="kinds">—</dd>
+    <dt>fields</dt><dd id="fields">—</dd>
+  </dl>
+  <label><input type="checkbox" id="boundaries" checked> tile boundaries</label>
+  <label><input type="checkbox" id="fills" checked> fills</label>
+  <label><input type="checkbox" id="outlines" checked> outlines</label>
+  <label><input type="checkbox" id="vertices"> vertices</label>
+  <button id="fit" type="button">fit to data</button>
+</div>
+
+<div id="picked"></div>
+<div id="error"></div>
+
+<script>
+// Twelve colours cycled by feature id, so neighbouring features differ. Keyed
+// on the *id* rather than an attribute because lyv does not carry
+// attributes through the pipeline yet; pass ?attr=NAME once it does.
+// Thirteen, and the count is the point: it has to be **prime**.
+//
+// Real data repeats a geometry. A river network carrying six water-quality
+// measures holds every segment six times, as six consecutive ids with
+// identical geometry — so six lines stack and whichever draws last owns the
+// pixel. That is always the last id in the group, which with groups starting
+// on a multiple of six is always the same value modulo six.
+//
+// With twelve colours that landed on exactly two of them, both purple, and a
+// whole river network rendered as one hue. Measured on riverquality z10: two
+// of twelve colours covered 100% of the inked pixels. At thirteen, all
+// thirteen appear and the largest share is 9%.
+//
+// Twelve was divisible by 2, 3, 4 and 6 — which are the group sizes real data
+// actually has. A prime cannot align with any of them.
+const PALETTE = [
+  '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD',
+  '#98D8C8', '#FFB6C1', '#87CEEB', '#F0E68C', '#FF9999', '#B19CD9',
+  '#E8A87C',
+];
+
+const params = new URLSearchParams(location.search);
+const attr = params.get('attr');
+
+/** The value to cycle the palette on: an attribute if asked for, else the id. */
+function key() {
+  return attr ? ['to-number', ['get', attr], 0] : ['to-number', ['id'], 0];
+}
+
+/** `case` chain mapping key % 12 onto the palette. */
+function colourBy() {
+  const bucket = ['%', key(), PALETTE.length];
+  const cases = [];
+  PALETTE.forEach((colour, i) => cases.push(['==', bucket, i], colour));
+  return ['case', ...cases, '#69D2E7'];
+}
+
+/**
+ * Is this data points?
+ *
+ * The one case where the vertex circles are not a debugging overlay but the
+ * only thing that draws at all — a point has no line to stroke and no ring to
+ * fill, so with the circles off the map is empty.
+ */
+function looksPointy(features) {
+  return features.some(feature => {
+    const type = feature.geometry && feature.geometry.type;
+    return type === 'Point' || type === 'MultiPoint';
+  });
+}
+
+/** Is this data areal: polygons rather than lines or points? */
+function looksAreal(features) {
+  return features.some(feature => {
+    const type = feature.geometry && feature.geometry.type;
+    return type === 'Polygon' || type === 'MultiPolygon';
+  });
+}
+
+/** Web mercator y for a latitude, in 0..1 world units from the north. */
+function mercatorY(lat) {
+  const clamped = Math.max(-85.051129, Math.min(85.051129, lat));
+  const radians = clamped * Math.PI / 180;
+  return 0.5 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / (2 * Math.PI);
+}
+
+/** The inverse, for putting the centre back into a latitude. */
+function mercatorLat(y) {
+  return Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI;
+}
+
+/**
+ * Where to point the camera so that `extent` fills the viewport.
+ *
+ * Computed rather than left to `map.fitBounds`, which has to be called after
+ * construction and so competes with whatever the constructor was given. This
+ * is deterministic and unit-testable, and MapLibre's vector tiles are 512px.
+ */
+function cameraFor(extent, width, height, padding, maxZoom) {
+  const [minLon, minLat, maxLon, maxLat] = extent;
+  const usableWidth = Math.max(1, width - 2 * padding);
+  const usableHeight = Math.max(1, height - 2 * padding);
+
+  const lonSpan = Math.max(1e-9, maxLon - minLon);
+  const [northY, southY] = [mercatorY(maxLat), mercatorY(minLat)];
+  const ySpan = Math.max(1e-12, Math.abs(southY - northY));
+
+  // Zoom that fits each axis; the smaller wins, so nothing is cut off.
+  const zoomForLon = Math.log2((usableWidth * 360) / (512 * lonSpan));
+  const zoomForLat = Math.log2(usableHeight / (512 * ySpan));
+
+  // Clamped to the archive's own deepest zoom. A tiny or degenerate extent
+  // otherwise asks for zoom 40, and there is no data down there anyway.
+  const fitted = Math.min(zoomForLon, zoomForLat);
+  const ceiling = Number.isFinite(maxZoom) ? maxZoom : 22;
+  return {
+    center: [(minLon + maxLon) / 2, mercatorLat((northY + southY) / 2)],
+    zoom: Math.max(0, Math.min(fitted, ceiling)),
+  };
+}
+
+/** `antimeridian_adjusted_bounds` as four numbers, or null if absent. */
+function adjustedBounds(metadata) {
+  const text = metadata && metadata.antimeridian_adjusted_bounds;
+  if (typeof text !== 'string') return null;
+  const numbers = text.split(',').map(Number);
+  return numbers.length === 4 && numbers.every(Number.isFinite) ? numbers : null;
+}
+
+function fail(message) {
+  const box = document.getElementById('error');
+  box.textContent = message;
+  box.style.display = 'grid';
+}
+
+fetch('config.json').then(r => r.json()).then(rawConfig => {
+  let config = rawConfig;
+  document.getElementById('title').textContent = config.name;
+
+  const protocol = new pmtiles.Protocol();
+  maplibregl.addProtocol('pmtiles', protocol.tile);
+  const archive = new pmtiles.PMTiles(config.archive);
+  protocol.add(archive);
+
+  // The layer to style: `--layer` if given, else the first one the archive
+  // declares in `vector_layers`, else the file's stem.
+  return Promise.all([archive.getHeader(), archive.getMetadata()])
+    .then(([header, metadata]) => {
+      const declared = metadata && Array.isArray(metadata.vector_layers)
+        ? metadata.vector_layers
+        : [];
+      const layer = config.layer || (declared[0] && declared[0].id) || config.stem;
+      config = { ...config, layer, declared };
+      const others = declared.length > 1 ? ` (+${declared.length - 1} more)` : '';
+      document.getElementById('layer').textContent = layer + others;
+      return { config, header, metadata };
+    });
+}).then(({ config, header, metadata }) => {
+  const url = `pmtiles://${config.archive}`;
+  document.getElementById('zooms').textContent =
+    `${header.minZoom}–${header.maxZoom}`;
+
+  // Open on the extent the archive declares. Data across the antimeridian
+  // has bounds claiming every longitude, and its real extent, running past
+  // 180, in `antimeridian_adjusted_bounds`. An archive that declares neither
+  // claims the whole world, and gets the whole world.
+  const headerBounds = [
+    header.minLon, header.minLat, header.maxLon, header.maxLat,
+  ];
+  const adjusted = adjustedBounds(metadata);
+  const extent = adjusted
+    || (headerBounds.every(Number.isFinite) ? headerBounds : null);
+
+  const container = document.getElementById('map');
+  const framed = extent
+    ? cameraFor(extent, container.clientWidth, container.clientHeight, 40,
+                header.maxZoom)
+    : { center: [header.centerLon, header.centerLat], zoom: 0 };
+
+  // No `hash: true`. It sounds harmless and is not: the hash outlives a
+  // reload, so a position from an earlier session silently overrides the
+  // framing and the map opens somewhere else entirely. Use the fit button.
+  const map = new maplibregl.Map({
+    container: 'map',
+    center: framed.center,
+    zoom: framed.zoom,
+    style: {
+      version: 8,
+      // No basemap on purpose: a tileset under test should be the only thing
+      // on screen, so that an empty tile looks empty.
+      sources: {
+        tiles: { type: 'vector', url, minzoom: header.minZoom, maxzoom: header.maxZoom },
+      },
+      layers: [
+        { id: 'background', type: 'background', paint: { 'background-color': '#12161c' } },
+        {
+          id: 'fill',
+          type: 'fill',
+          source: 'tiles',
+          'source-layer': config.layer,
+          paint: { 'fill-color': colourBy(), 'fill-opacity': 0.55 },
+        },
+        {
+          // Everything, polygons included. That is only honest with a buffer:
+          // the buffer welds each tile to its neighbours, cancelling the
+          // artificial runs along the shared tile edges, so what is left to
+          // stroke is the real boundary. Build with `--buffer 0` and the tile grid
+          // reappears — correctly, since there is then nothing to cancel
+          // against.
+          id: 'outline',
+          type: 'line',
+          source: 'tiles',
+          'source-layer': config.layer,
+          paint: { 'line-color': colourBy(), 'line-width': 1.4 },
+        },
+        {
+          // Off unless the data is points, where the vertices *are* the
+          // data and nothing else would draw. On linework they are a
+          // debugging view — how you tell simplification from cutting — so
+          // they are a deliberate act rather than the default.
+          id: 'vertices',
+          type: 'circle',
+          source: 'tiles',
+          'source-layer': config.layer,
+          minzoom: 0,
+          layout: { visibility: 'none' },
+          paint: {
+            'circle-radius': 2.2,
+            // The same colour as the outline, so a vertex reads as belonging
+            // to its feature rather than as a separate layer of white dots.
+            'circle-color': colourBy(),
+            'circle-opacity': 0.85,
+          },
+        },
+      ],
+    },
+  });
+  window.map = map;
+  map.showTileBoundaries = true;
+  map.addControl(new maplibregl.NavigationControl(), 'top-right');
+  map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
+
+  document.getElementById('boundaries').addEventListener('change', event => {
+    map.showTileBoundaries = event.target.checked;
+  });
+  /**
+   * A checkbox whose starting state is decided from the loaded tiles once,
+   * and never over the top of a choice already made by hand.
+   */
+  function autoToggle(box, layer, suits) {
+    const input = document.getElementById(box);
+    const apply = () => {
+      map.setLayoutProperty(
+        layer, 'visibility', input.checked ? 'visible' : 'none');
+    };
+    let byHand = false;
+    let decided = false;
+    input.addEventListener('change', () => {
+      byHand = true;
+      apply();
+    });
+    return features => {
+      if (decided || byHand) return;
+      decided = true;
+      input.checked = suits(features);
+      apply();
+    };
+  }
+
+  const decideFills = autoToggle('fills', 'fill', looksAreal);
+  // Points have nothing but vertices, so the circles are the whole picture.
+  // Anything else draws as lines already, and the dots are a debugging view.
+  const decideVertices = autoToggle('vertices', 'vertices', looksPointy);
+
+  document.getElementById('outlines').addEventListener('change', event => {
+    map.setLayoutProperty(
+      'outline', 'visibility', event.target.checked ? 'visible' : 'none');
+  });
+
+  document.getElementById('fit').addEventListener('click', () => {
+    if (!extent) return;
+    const again = cameraFor(
+      extent, container.clientWidth, container.clientHeight, 40, header.maxZoom);
+    map.jumpTo(again);
+  });
+
+  const declared = config.declared && config.declared[0];
+  const fieldNames = declared && declared.fields
+    ? Object.keys(declared.fields)
+    : [];
+  document.getElementById('fields').textContent =
+    fieldNames.length > 0 ? fieldNames.join(', ') : 'none declared';
+
+  const zoomBox = document.getElementById('zoom');
+  const update = () => { zoomBox.textContent = map.getZoom().toFixed(2); };
+  map.on('move', update);
+  update();
+
+  // What is actually in the loaded tiles.
+  map.on('idle', () => {
+    let features = [];
+    try {
+      features = map.querySourceFeatures('tiles', { sourceLayer: config.layer });
+    } catch (error) {
+      console.warn(error);
+      return;
+    }
+    document.getElementById('count').textContent = features.length;
+
+    const kinds = {};
+    for (const feature of features) {
+      const kind = feature.geometry && feature.geometry.type;
+      if (kind) kinds[kind] = (kinds[kind] || 0) + 1;
+    }
+    const summary = Object.entries(kinds)
+      .sort((a, b) => b[1] - a[1])
+      .map(([kind, n]) => `${kind} ×${n}`)
+      .join(', ');
+    document.getElementById('kinds').textContent = summary || 'none';
+
+    // Decide once, and never over the top of a choice already made by hand.
+    if (features.length > 0) {
+      decideFills(features);
+      decideVertices(features);
+    }
+  });
+
+  const picked = document.getElementById('picked');
+  map.on('click', event => {
+    const hits = map.queryRenderedFeatures(event.point, {
+      layers: ['fill', 'outline', 'vertices'],
+    });
+    if (hits.length === 0) { picked.style.display = 'none'; return; }
+    const hit = hits[0];
+    picked.textContent = JSON.stringify(
+      { id: hit.id, geometry: hit.geometry.type, properties: hit.properties },
+      null, 2);
+    picked.style.display = 'block';
+  });
+
+  map.on('error', event => {
+    if (event && event.error) console.warn(event.error);
+  });
+}).catch(error => {
+  fail(`Could not load the archive.\n\n${error}`);
+});
+</script>
+</body>
+</html>

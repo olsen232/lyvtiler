@@ -1,0 +1,63 @@
+[package]
+name = "lyv"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["mimalloc"]
+
+# An allocator that returns freed pages to the operating system, which the
+# system one on macOS largely does not. Worth 15% of wall time and 41% of
+# instructions retired on a 3.5M-feature build, because a sixth of what the
+# process did was the system allocator's own bookkeeping — the merge climb
+# allocates millions of small vectors per level, which is the workload
+# general-purpose allocators handle worst.
+#
+# On by default, so that a plain `cargo build --release` is the fast one.
+# `--no-default-features` gives the system allocator back.
+mimalloc = ["dep:mimalloc"]
+
+# Count live bytes with a wrapping global allocator, and print the peak.
+# Off by default: the thread-local read it adds to every allocation costs a
+# few percent, which is too much to pay for a number that is only wanted
+# when somebody is asking about memory. Combines with `mimalloc`, and
+# should — live bytes are only meaningful beside the resident set size of
+# the allocator that will actually ship.
+memory-stats = ["dep:lyv-alloc"]
+
+[dependencies]
+lyv-buffer.workspace = true
+lyv-core.workspace = true
+lyv-close.workspace = true
+lyv-coverage.workspace = true
+lyv-cut.workspace = true
+lyv-merge.workspace = true
+lyv-mvt.workspace = true
+lyv-progress.workspace = true
+lyv-rank.workspace = true
+lyv-seam.workspace = true
+lyv-simplify.workspace = true
+lyv-source.workspace = true
+lyv-store.workspace = true
+lyv-archive.workspace = true
+lyv-alloc = { workspace = true, optional = true }
+anyhow.workspace = true
+clap.workspace = true
+geo-types.workspace = true
+mimalloc = { version = "0.1.52", optional = true }
+
+[dev-dependencies]
+lyv-archive.workspace = true
+flatgeobuf.workspace = true
+geozero.workspace = true
+rusqlite.workspace = true
+lyv-buffer.workspace = true
+geo.workspace = true
+lyv-store.workspace = true
+flate2.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

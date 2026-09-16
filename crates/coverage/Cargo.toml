@@ -1,0 +1,15 @@
+[package]
+name = "lyv-coverage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lyv-core.workspace = true
+geo-types.workspace = true
+
+[dev-dependencies]
+lyv-cut.workspace = true

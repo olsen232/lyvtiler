@@ -1,0 +1,13 @@
+[package]
+name = "lyv-simplify"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lyv-core.workspace = true
+geo.workspace = true
+geo-types.workspace = true

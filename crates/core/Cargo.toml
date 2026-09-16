@@ -1,0 +1,12 @@
+[package]
+name = "lyv-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+geo-types.workspace = true
+indexmap.workspace = true

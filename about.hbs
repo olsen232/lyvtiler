@@ -1,0 +1,40 @@
+# Third-party licenses
+
+`lyv` links the Rust crates listed below, including their build dependencies.
+Every one is under a permissive license; none is copyleft. This file is generated —
+`cargo about generate about.hbs -o THIRD-PARTY-LICENSES.md` — and regenerating it after
+a dependency change is how a new obligation gets noticed.
+
+Two things are **not** in this list and are worth stating:
+
+- **SQLite** is compiled into the binary by `libsqlite3-sys`. Its C source is in the
+  **public domain**, so it carries no attribution requirement at all. The Rust wrapper
+  around it is MIT, and appears below.
+- **`tippecanoe-decode`** is executed as a separate program by one test, which skips
+  itself when the binary is absent. No code from it is linked or distributed, so it
+  imposes nothing.
+
+## Licenses in use
+
+{{#each overview}}
+- {{{name}}} — {{count}} crate{{#if (ne count 1)}}s{{/if}}
+{{/each}}
+
+The sections below are one per distinct license *text*, not per license: the MIT and
+BSD texts carry their own copyright lines, so a license used by two hundred crates
+appears once for each wording. Search for a crate name to find its terms.
+
+{{#each licenses}}
+## {{{name}}}
+
+Used by:
+
+{{#each used_by}}
+- [{{{crate.name}}} {{crate.version}}]({{#if crate.repository}}{{{crate.repository}}}{{else}}https://crates.io/crates/{{{crate.name}}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

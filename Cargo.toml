@@ -1,0 +1,57 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Andrew Olsen"]
+description = "Build a vector tile pyramid from vector data"
+license = "BSD-3-Clause"
+# None of these is on crates.io. Saying so keeps `cargo publish` from going
+# off half-cocked, and keeps our own crates out of the third-party
+# attribution file, where they were being linked to registry pages that do
+# not exist.
+publish = false
+
+[workspace.dependencies]
+lyv-buffer = { path = "crates/buffer" }
+lyv-close = { path = "crates/close" }
+lyv-coverage = { path = "crates/coverage" }
+lyv-core = { path = "crates/core" }
+lyv-cut = { path = "crates/cut" }
+lyv-merge = { path = "crates/merge" }
+lyv-mvt = { path = "crates/mvt" }
+lyv-progress = { path = "crates/progress" }
+lyv-rank = { path = "crates/rank" }
+lyv-seam = { path = "crates/seam" }
+lyv-simplify = { path = "crates/simplify" }
+lyv-source = { path = "crates/source" }
+lyv-store = { path = "crates/store" }
+lyv-archive = { path = "crates/archive" }
+lyv-alloc = { path = "crates/alloc" }
+
+anyhow = "1.0.104"
+clap = { version = "4", features = ["derive"] }
+# Without the default `http` feature, which lyv never uses: it pulls in reqwest
+# and OpenSSL, which stops the binary cross-compiling for Linux.
+flatgeobuf = { version = "6.0.1", default-features = false }
+# An insertion-ordered set: a hash lookup by name and an array lookup by
+# index, over the same entries. Already in the tree by way of the Parquet
+# reader, so declaring it directly costs nothing.
+indexmap = "2.14"
+flate2 = "1.1.10"
+geo = "0.33.1"
+geo-types = "0.7.20"
+geozero = { version = "0.15.1", default-features = false, features = ["with-mvt", "with-geo", "with-geojson"] }
+pmtiles = { version = "0.24.0", default-features = false, features = ["write"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+
+[profile.release]
+# Line tables, so a sampling profiler can name a frame. No effect on the code
+# generated — it only stops the symbols being thrown away — and `samply record
+# ./lyv ...` works against an ordinary release build rather than needing one
+# built specially.
+debug = 1
