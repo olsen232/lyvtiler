@@ -21,7 +21,7 @@ accepted = [
     "0BSD",
     "BSL-1.0",
     "Unlicense",
-    # The ICU data tables, pulled in transitively by the GeoParquet reader.
+    # unicode-ident's Unicode tables, pulled in by proc-macro2 at build time.
     "Unicode-3.0",
     # A public-domain dedication rather than a license, on a build dependency.
     "CC0-1.0",
