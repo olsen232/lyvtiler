@@ -433,10 +433,12 @@ fn crs_of(authority: &str, code: i64, path: &Path) -> Result<Crs> {
 }
 
 /// The authority and code in a CRS name: `EPSG:3857`,
-/// `urn:ogc:def:crs:EPSG::3857`, or OGC's `CRS84`.
+/// `urn:ogc:def:crs:EPSG::3857`, or OGC's `CRS84` (`CRS84h` with a height
+/// axis, which lyv ignores).
 fn authority_and_code(name: &str) -> Option<(String, i64)> {
     let name = name.trim();
-    if name.to_ascii_uppercase().ends_with("CRS84") || name.eq_ignore_ascii_case("CRS:84") {
+    let upper = name.to_ascii_uppercase();
+    if upper.ends_with("CRS84") || upper.ends_with("CRS84H") || upper == "CRS:84" {
         return Some(("OGC".to_string(), 84));
     }
 
@@ -472,19 +474,26 @@ fn geoparquet_crs(crs: Option<&serde_json::Value>, path: &Path) -> Result<Crs> {
         return Ok(Crs::Wgs84);
     };
 
-    // PROJJSON's `id` holds authority and code; the code may be a number or a
-    // string.
+    // PROJJSON's `id` holds authority and code. The code may be a number, a
+    // number in a string, or a word: OGC's lon/lat is `CRS84`. Read as the
+    // name `authority:code`, which handles all three.
     let id = crs.get("id");
     let authority = id
         .and_then(|id| id.get("authority"))
         .and_then(serde_json::Value::as_str);
-    let code = id.and_then(|id| id.get("code")).and_then(|code| {
-        code.as_i64()
-            .or_else(|| code.as_str().and_then(|code| code.parse().ok()))
-    });
+    let code = id
+        .and_then(|id| id.get("code"))
+        .and_then(|code| match code {
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            serde_json::Value::String(text) => Some(text.clone()),
+            _ => None,
+        });
+    let named = authority
+        .zip(code)
+        .and_then(|(authority, code)| authority_and_code(&format!("{authority}:{code}")));
 
-    match (authority, code) {
-        (Some(authority), Some(code)) => crs_of(authority, code, path),
+    match named {
+        Some((authority, code)) => crs_of(&authority, code, path),
         // No `id`: a CRS defined by parameters, which needs a projection
         // database to identify. Refuse.
         _ => Err(unreadable_crs(
@@ -1600,6 +1609,11 @@ mod tests {
             Some(("OGC".to_string(), 84))
         );
         assert_eq!(authority_and_code("CRS84"), Some(("OGC".to_string(), 84)));
+        // With a height axis, which lyv ignores.
+        assert_eq!(
+            authority_and_code("OGC:CRS84h"),
+            Some(("OGC".to_string(), 84))
+        );
     }
 
     #[test]
@@ -1624,6 +1638,20 @@ mod tests {
             Crs::WebMercator
         );
         assert!(geoparquet_crs(Some(&nztm), path).is_err());
+
+        // OGC's lon/lat has a word for a code: GeoParquet's own default,
+        // written out, as GDAL does.
+        for code in ["CRS84", "CRS84h"] {
+            let crs84 = serde_json::json!({
+                "name": "WGS 84 (CRS84)",
+                "id": {"authority": "OGC", "code": code},
+            });
+            assert_eq!(
+                geoparquet_crs(Some(&crs84), path).unwrap(),
+                Crs::Wgs84,
+                "{code}"
+            );
+        }
 
         // Absent means CRS84 by the spec; null means unknown, read the same.
         assert_eq!(geoparquet_crs(None, path).unwrap(), Crs::Wgs84);
