@@ -46,7 +46,8 @@ fn options(dir: &Path, input: &Path) -> Options {
         max_auto_zoom: 16,
         output_layer: "out".to_string(),
         output_name: None,
-        attributes: None,
+        attributes: lyv::Attributes::All,
+        geometry_field: None,
         extent: 4096,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),
@@ -139,7 +140,7 @@ fn every_attribute_is_carried_by_default() {
 fn an_empty_list_carries_none() {
     // `--no-attributes`: an empty list, distinct from `None` (all).
     let tiles = build("geojson", write_geojson(SOURCE), |options| {
-        options.attributes = Some(Vec::new());
+        options.attributes = lyv::Attributes::Only(Vec::new());
     })
     .unwrap();
     assert!(attribute_names(&tiles).is_empty());
@@ -148,7 +149,7 @@ fn an_empty_list_carries_none() {
 #[test]
 fn a_named_list_carries_only_those() {
     let tiles = build("geojson", write_geojson(SOURCE), |options| {
-        options.attributes = Some(vec!["name".into(), "depth".into()]);
+        options.attributes = lyv::Attributes::Only(vec!["name".into(), "depth".into()]);
     })
     .unwrap();
     // `depth` is on one feature: sparse, which is fine.
@@ -160,7 +161,7 @@ fn an_attribute_no_feature_has_is_refused() {
     // A name nobody has is probably a typo, so it's an error.
     let error = refused(
         build("geojson", write_geojson(SOURCE), |options| {
-            options.attributes = Some(vec!["name".into(), "naem".into()]);
+            options.attributes = lyv::Attributes::Only(vec!["name".into(), "naem".into()]);
         }),
         "a name nothing carries should be refused",
     );
@@ -176,7 +177,7 @@ fn the_attribute_check_runs_on_flatgeobuf_too() {
     // Each reader filters its own way, so each needs its own proof.
     let error = refused(
         build("fgb", write_fgb(UNIFORM), |options| {
-            options.attributes = Some(vec!["nonesuch".into()]);
+            options.attributes = lyv::Attributes::Only(vec!["nonesuch".into()]);
         }),
         "a name nothing carries should be refused",
     );
@@ -186,7 +187,7 @@ fn the_attribute_check_runs_on_flatgeobuf_too() {
 #[test]
 fn flatgeobuf_filters_attributes_too() {
     let tiles = build("fgb", write_fgb(UNIFORM), |options| {
-        options.attributes = Some(vec!["kind".into()]);
+        options.attributes = lyv::Attributes::Only(vec!["kind".into()]);
     })
     .unwrap();
     assert_eq!(attribute_names(&tiles), ["kind"]);

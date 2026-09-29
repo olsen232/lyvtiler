@@ -62,7 +62,8 @@ fn build(body: &str) -> Collected {
         max_auto_zoom: 16,
         output_layer: "points".to_string(),
         output_name: None,
-        attributes: None,
+        attributes: lyv::Attributes::All,
+        geometry_field: None,
         extent: 4096,
         // One resolution everywhere, so the collapse test's halving is plain.
         maxzoom_extent: Some(4096),

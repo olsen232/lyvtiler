@@ -52,9 +52,29 @@ struct Cli {
     #[arg(long, value_delimiter = ',', conflicts_with = "no_attributes")]
     attributes: Option<Vec<String>>,
 
+    /// Carry every attribute except these. Comma separated list.
+    ///
+    /// The other way round from `--attributes`, for when the few to drop are
+    /// easier to name than the many to keep. As there, a name that no feature
+    /// has is an error, or a typo would keep the field it meant to drop.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "SKIP_ATTRIBUTES",
+        conflicts_with_all = ["attributes", "no_attributes"]
+    )]
+    skip_attributes: Option<Vec<String>>,
+
     /// Carry no attributes at all: geometry only.
     #[arg(long)]
     no_attributes: bool,
+
+    /// The geometry column to read, for a GeoParquet file with more than one.
+    ///
+    /// Defaults to the file's primary geometry column. Other formats have one
+    /// geometry per feature and refuse this.
+    #[arg(long, value_name = "NAME")]
+    geometry_field: Option<String>,
 
     /// Output one line per stage instead of rewriting a line continuously to
     /// show progress updates.
@@ -475,12 +495,15 @@ fn main() -> Result<()> {
         max_auto_zoom: cli.max_auto_zoom,
         output_layer,
         output_name: cli.output_name,
-        // `--no-attributes` is `--attributes` with nothing in it.
-        attributes: if cli.no_attributes {
-            Some(Vec::new())
-        } else {
-            cli.attributes
+        // `--no-attributes` is `--attributes` with nothing in it. Clap refuses
+        // any two of the three together.
+        attributes: match (cli.no_attributes, cli.attributes, cli.skip_attributes) {
+            (true, _, _) => lyv::Attributes::Only(Vec::new()),
+            (_, Some(names), _) => lyv::Attributes::Only(names),
+            (_, _, Some(names)) => lyv::Attributes::Except(names),
+            _ => lyv::Attributes::All,
         },
+        geometry_field: cli.geometry_field,
         extent: cli.extent,
         maxzoom_extent: Some(maxzoom_extent),
         buffer: cli.buffer,
@@ -546,9 +569,28 @@ fn elapsed(taken: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_layer_name, elapsed};
+    use super::{Cli, default_layer_name, elapsed};
+    use clap::Parser;
     use std::path::Path;
     use std::time::Duration;
+
+    #[test]
+    fn attributes_can_be_listed_or_skipped_but_not_both() {
+        let parse = |flags: &[&str]| {
+            let mut args = vec!["lyv", "in.fgb", "out.pmtiles"];
+            args.extend_from_slice(flags);
+            Cli::try_parse_from(args)
+        };
+        assert!(parse(&["--attributes", "a"]).is_ok());
+        assert!(parse(&["--skip-attributes", "a,b"]).is_ok());
+        for both in [
+            &["--attributes", "a", "--skip-attributes", "b"][..],
+            &["--skip-attributes", "b", "--no-attributes"][..],
+            &["--attributes", "a", "--no-attributes"][..],
+        ] {
+            assert!(parse(both).is_err(), "{both:?} should be refused");
+        }
+    }
 
     #[test]
     fn the_layer_is_named_after_the_output() {

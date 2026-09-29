@@ -172,3 +172,135 @@ fn a_parquet_file_that_is_not_geoparquet_says_so() {
         "should say what is wrong with it, got: {said}"
     );
 }
+
+/// Squares in `geometry`, the primary column by its name, and a label point
+/// for each in `label`.
+fn two_geometries(dir: &std::path::Path) -> std::path::PathBuf {
+    use geoarrow_array::builder::PointBuilder;
+    use geoarrow_schema::PointType;
+
+    let squares: Vec<geo_types::Polygon<f64>> = (0..3)
+        .map(|i| square(172.0 + f64::from(i), -44.0, 0.2))
+        .collect();
+    let labels: Vec<geo_types::Point<f64>> = (0..3)
+        .map(|i| geo_types::Point::new(172.1 + f64::from(i), -43.9))
+        .collect();
+    let polygons = PolygonBuilder::from_polygons(
+        &squares,
+        PolygonType::new(Dimension::XY, Default::default()).with_coord_type(CoordType::Separated),
+    )
+    .finish();
+    let points = PointBuilder::from_points(
+        labels.iter(),
+        PointType::new(Dimension::XY, Default::default()).with_coord_type(CoordType::Separated),
+    )
+    .finish();
+
+    let schema = Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        polygons.data_type().to_field("geometry", true),
+        points.data_type().to_field("label", true),
+    ]);
+    let names: Vec<String> = (0..3).map(|i| format!("square {i}")).collect();
+    let batch = RecordBatch::try_new(
+        Arc::new(schema.clone()),
+        vec![
+            Arc::new(StringArray::from(names)),
+            polygons.to_array_ref(),
+            points.to_array_ref(),
+        ],
+    )
+    .unwrap();
+
+    let path = dir.join("two.parquet");
+    let mut encoder =
+        GeoParquetRecordBatchEncoder::try_new(&schema, &GeoParquetWriterOptions::default())
+            .unwrap();
+    let mut writer = ArrowWriter::try_new(
+        std::fs::File::create(&path).unwrap(),
+        encoder.target_schema(),
+        None,
+    )
+    .unwrap();
+    writer
+        .write(&encoder.encode_record_batch(&batch).unwrap())
+        .unwrap();
+    writer.append_key_value_metadata(encoder.into_keyvalue().unwrap());
+    writer.close().unwrap();
+    path
+}
+
+fn read_field(path: &std::path::Path, field: Option<&str>) -> anyhow::Result<Vec<SourceFeature>> {
+    let mut out = Vec::new();
+    read(
+        path,
+        Z,
+        EXTENT,
+        &Selection {
+            geometry_field: field.map(str::to_string),
+            ..Selection::default()
+        },
+        &mut |_| {},
+        &mut |feature| {
+            out.push(feature);
+            Ok(())
+        },
+    )?;
+    Ok(out)
+}
+
+#[test]
+fn the_primary_geometry_column_is_read_unless_another_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = two_geometries(dir.path());
+
+    let primary = read_field(&path, None).unwrap();
+    assert!(primary.iter().all(|f| f.kind == Kind::Rings));
+    let labels = read_field(&path, Some("label")).unwrap();
+    assert_eq!(labels.len(), 3);
+    assert!(labels.iter().all(|f| f.kind == Kind::Points));
+
+    // The column not read as geometry isn't read as an attribute either.
+    for features in [&primary, &labels] {
+        let names: Vec<&str> = features[0]
+            .properties
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(names, vec!["name"]);
+    }
+}
+
+#[test]
+fn a_geometry_field_that_is_not_one_is_refused_with_those_there_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = two_geometries(dir.path());
+    for wrong in ["centroid", "name"] {
+        let said = format!("{:#}", read_field(&path, Some(wrong)).unwrap_err());
+        assert!(
+            said.contains(wrong) && said.contains("geometry, label"),
+            "{said}"
+        );
+    }
+}
+
+#[test]
+fn asking_for_a_column_that_cannot_be_carried_is_an_error() {
+    // The other geometry column isn't an MVT value: asked for by name, that
+    // must be said, not silently leave the tileset without it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = two_geometries(dir.path());
+    let result = read(
+        &path,
+        Z,
+        EXTENT,
+        &Selection {
+            attributes: lyv_source::Attributes::Only(vec!["name".into(), "label".into()]),
+            ..Selection::default()
+        },
+        &mut |_| {},
+        &mut |_| Ok(()),
+    );
+    let said = format!("{:#}", result.expect_err("label can't be carried"));
+    assert!(said.contains("label"), "{said}");
+}

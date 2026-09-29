@@ -44,12 +44,13 @@ thing you can do about tile size on an attribute-heavy layer:
 
 ```
 lyv parcels.fgb parcels.pmtiles --attributes title_no,owner,area
+lyv parcels.fgb parcels.pmtiles --skip-attributes notes,audit_id
 lyv parcels.fgb parcels.pmtiles --no-attributes
 ```
 
 An attribute named there that **no** feature turns out to have is an error, so
-a typo cannot quietly produce a tileset missing a field. A name that only some
-features have is fine.
+a typo cannot quietly produce a tileset missing a field, or keeping one. A name
+that only some features have is fine.
 
 Every flag is in [FLAGS.md](FLAGS.md), and `lyv --help` gives the reasoning
 behind each default.

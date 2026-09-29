@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub use lyv_progress::{Progress, Verbosity, show_memory};
 pub use lyv_rank::Limits;
+pub use lyv_source::Attributes;
 
 use anyhow::{Context, Result, bail};
 use lyv_core::{Local, Pieces, TileCoord};
@@ -39,9 +40,11 @@ pub struct Options {
     /// The tileset's name in the archive's metadata. `None` is the output
     /// file's stem.
     pub output_name: Option<String>,
-    /// Attributes to carry: `None` for all, empty for none. A name no feature
-    /// has is an error.
-    pub attributes: Option<Vec<String>>,
+    /// Attributes to carry. A name listed that no feature has is an error.
+    pub attributes: Attributes,
+    /// The geometry column to read, for a GeoParquet file with more than one.
+    /// `None` is the file's primary column.
+    pub geometry_field: Option<String>,
     pub extent: u32,
     /// Tile resolution at maxzoom, if finer than `extent`. Maxzoom's detail
     /// can't be recovered later, so it's worth spending resolution on. Must be
@@ -606,6 +609,7 @@ fn stream_pass(
                 at.detail,
                 &lyv_source::Selection {
                     attributes: options.attributes.clone(),
+                    geometry_field: options.geometry_field.clone(),
                 },
                 // Known before the first feature for FlatGeobuf (header) and
                 // GeoJSON (parsed whole).
@@ -2507,7 +2511,8 @@ mod tests {
             max_auto_zoom: 16,
             output_layer: "l".to_string(),
             output_name: None,
-            attributes: None,
+            attributes: Attributes::All,
+            geometry_field: None,
             extent: 4096,
             maxzoom_extent: None,
             ranker: "evenstar".to_string(),

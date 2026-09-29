@@ -15,7 +15,9 @@ simplification and what to drop by itself.
 | `-l`, `--output-layer <NAME>` | the output file's stem | Layer name inside the tiles. |
 | `-n`, `--output-name <NAME>` | the output file's stem | Human-readable name for the tileset, in the archive's metadata. |
 | `--attributes <A,B,C>` | all | Carry only these attributes into the tiles. Comma separated list. |
+| `--skip-attributes <A,B,C>` | none | Carry every attribute except these. Can't be combined with `--attributes`. |
 | `--no-attributes` | off | Carry no attributes at all: geometry only. |
+| `--geometry-field <NAME>` | the primary column | Which geometry column to read, for GeoParquet with more than one. |
 
 ## Running
 

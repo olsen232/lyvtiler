@@ -97,55 +97,84 @@ pub struct SourceFeature {
 /// never parsed or carried.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Selection {
-    /// Attribute names to carry: `None` for all, empty for none. A name no
-    /// feature has is an error, so a typo can't silently lose a field.
-    pub attributes: Option<Vec<String>>,
+    pub attributes: Attributes,
+    /// The geometry column to read, for a GeoParquet file with more than one.
+    /// `None` is the file's primary column. Other formats have one geometry
+    /// per feature, and refuse a name.
+    pub geometry_field: Option<String>,
 }
 
-/// The attribute filter, plus which asked-for names have turned up. Stops
+/// Which attributes to carry. A name listed that no feature has is an error,
+/// so a typo can't silently lose a field, or keep one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Attributes {
+    #[default]
+    All,
+    /// Only these. Empty for none.
+    Only(Vec<String>),
+    /// Every one but these.
+    Except(Vec<String>),
+}
+
+/// The attribute filter, plus which listed names have turned up. Stops
 /// tracking once they all have.
 struct Wanted {
-    keep: Option<std::collections::BTreeSet<String>>,
-    seen: std::collections::BTreeSet<String>,
+    listed: std::collections::BTreeSet<String>,
+    /// Whether the listed names are the ones kept, or the ones skipped.
+    keep_listed: bool,
+    /// A kept name counts once it's carried, so asking for a column that can't
+    /// be (a date, a second geometry) is an error rather than a missing
+    /// field. A skipped name is never carried, so it counts when met. A cell,
+    /// since readers hold the filter shared while they walk a feature.
+    seen: std::cell::RefCell<std::collections::BTreeSet<String>>,
 }
 
 impl Wanted {
     fn new(selection: &Selection) -> Self {
+        let (names, keep_listed): (&[String], bool) = match &selection.attributes {
+            Attributes::All => (&[], false),
+            Attributes::Only(names) => (names, true),
+            Attributes::Except(names) => (names, false),
+        };
         Self {
-            keep: selection
-                .attributes
-                .as_ref()
-                .map(|names| names.iter().cloned().collect()),
-            seen: std::collections::BTreeSet::new(),
+            listed: names.iter().cloned().collect(),
+            keep_listed,
+            seen: Default::default(),
         }
     }
 
     /// Whether an attribute of this name should be carried at all.
     fn keeps(&self, name: &str) -> bool {
-        self.keep.as_ref().is_none_or(|keep| keep.contains(name))
+        let listed = self.listed.contains(name);
+        if listed && !self.keep_listed {
+            self.saw(name);
+        }
+        listed == self.keep_listed
     }
 
-    /// Record which asked-for names a feature has.
-    fn note(&mut self, properties: &[(String, Value)]) {
-        let Some(keep) = &self.keep else { return };
-        if self.seen.len() == keep.len() {
-            return;
-        }
-        for (name, _) in properties {
-            if !self.seen.contains(name) {
-                self.seen.insert(name.clone());
+    /// Record the kept names a feature carried.
+    fn note(&self, properties: &[(String, Value)]) {
+        if self.keep_listed {
+            for (name, _) in properties {
+                self.saw(name);
             }
         }
     }
 
-    /// Fail if an asked-for name was never seen on any feature.
+    fn saw(&self, name: &str) {
+        let mut seen = self.seen.borrow_mut();
+        if seen.len() < self.listed.len() && !seen.contains(name) {
+            seen.insert(name.to_string());
+        }
+    }
+
+    /// Fail if a listed name was never seen on any feature.
     fn check(&self, path: &Path) -> Result<()> {
-        let Some(keep) = &self.keep else {
-            return Ok(());
-        };
-        let missing: Vec<&str> = keep
+        let seen = self.seen.borrow();
+        let missing: Vec<&str> = self
+            .listed
             .iter()
-            .filter(|name| !self.seen.contains(*name))
+            .filter(|name| !seen.contains(*name))
             .map(String::as_str)
             .collect();
         if missing.is_empty() {
@@ -164,6 +193,18 @@ impl Wanted {
     }
 }
 
+/// Refuse `--geometry-field` for a format with one geometry per feature.
+fn only_one_geometry(selection: &Selection, path: &Path) -> Result<()> {
+    if let Some(name) = &selection.geometry_field {
+        bail!(
+            "{} has one geometry per feature, so there's no geometry field {name:?} to choose; \
+             --geometry-field is for GeoParquet",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Read a GeoJSON file onto the global grid for `maxzoom` at `extent`.
 ///
 /// `visit` is called once per feature, in file order: a callback, so large
@@ -176,7 +217,8 @@ pub fn read_geojson(
     expect: &mut dyn FnMut(u64),
     visit: &mut dyn FnMut(SourceFeature) -> Result<()>,
 ) -> Result<Skipped> {
-    let mut wanted = Wanted::new(selection);
+    only_one_geometry(selection, path)?;
+    let wanted = Wanted::new(selection);
     let mut skipped = Skipped::default();
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -480,7 +522,8 @@ pub fn read_flatgeobuf(
     use flatgeobuf::{FallibleStreamingIterator, FgbReader};
     use geozero::{FeatureProperties, ToGeo};
 
-    let mut wanted = Wanted::new(selection);
+    only_one_geometry(selection, path)?;
+    let wanted = Wanted::new(selection);
     let mut skipped = Skipped::default();
 
     let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
@@ -621,7 +664,7 @@ pub fn read_geoparquet(
     expect: &mut dyn FnMut(u64),
     visit: &mut dyn FnMut(SourceFeature) -> Result<()>,
 ) -> Result<Skipped> {
-    let mut wanted = Wanted::new(selection);
+    let wanted = Wanted::new(selection);
     use geoparquet::reader::{GeoParquetReaderBuilder, GeoParquetRecordBatchReader};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -650,15 +693,27 @@ pub fn read_geoparquet(
         .map_err(|error| anyhow::anyhow!("{error}"))
         .with_context(|| format!("reading the geometry schema of {}", path.display()))?;
 
+    // The primary column unless told otherwise. GeoParquet lists every
+    // geometry column in its metadata, so a name that isn't one is refused
+    // here, with the ones there are.
+    let geometry_column = selection
+        .geometry_field
+        .clone()
+        .unwrap_or_else(|| geo.primary_column.clone());
+    let Some(column) = geo.columns.get(&geometry_column) else {
+        let mut names: Vec<&str> = geo.columns.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        bail!(
+            "{} has no geometry column {geometry_column:?}; its geometry columns are {}",
+            path.display(),
+            names.join(", ")
+        );
+    };
+
     // Read from the metadata rather than per batch: GeoParquet requires every
     // chunk of a column to share one CRS, and this way a refusal comes before
     // the first row is decoded.
-    let crs = geoparquet_crs(
-        geo.columns
-            .get(&geo.primary_column)
-            .and_then(|column| column.crs.as_ref()),
-        path,
-    )?;
+    let crs = geoparquet_crs(column.crs.as_ref(), path)?;
 
     let reader = builder
         .build()
@@ -669,10 +724,9 @@ pub fn read_geoparquet(
     let mut sequence = 0u64;
     for batch in reader {
         let batch = batch.with_context(|| format!("reading a batch of {}", path.display()))?;
-        let geometry_column = &geo.primary_column;
         let index = batch
             .schema()
-            .index_of(geometry_column)
+            .index_of(&geometry_column)
             .with_context(|| format!("{} has no column {geometry_column:?}", path.display()))?;
 
         let geometries = geoarrow_geometries(batch.column(index), batch.schema().field(index))
@@ -939,6 +993,63 @@ mod tests {
             },
         )?;
         Ok((out, skipped))
+    }
+
+    fn read_selecting(json: &str, selection: &Selection) -> Result<Vec<SourceFeature>> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.geojson");
+        std::fs::write(&path, json).unwrap();
+        let mut out = Vec::new();
+        crate::read(&path, 12, EXTENT, selection, &mut |_| {}, &mut |feature| {
+            out.push(feature);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    const TWO: &str = r#"{"type":"FeatureCollection","features":[
+        {"type":"Feature","properties":{"a":1,"b":2,"c":3},
+         "geometry":{"type":"Point","coordinates":[174.7,-41.3]}},
+        {"type":"Feature","properties":{"a":4,"d":5},
+         "geometry":{"type":"Point","coordinates":[174.8,-41.2]}}]}"#;
+
+    fn names(feature: &SourceFeature) -> Vec<&str> {
+        feature.properties.iter().map(|(k, _)| k.as_str()).collect()
+    }
+
+    #[test]
+    fn skipped_attributes_are_left_out_and_the_rest_kept() {
+        let selection = Selection {
+            attributes: Attributes::Except(vec!["b".into(), "d".into()]),
+            ..Selection::default()
+        };
+        let features = read_selecting(TWO, &selection).unwrap();
+        assert_eq!(names(&features[0]), vec!["a", "c"]);
+        assert_eq!(names(&features[1]), vec!["a"]);
+    }
+
+    #[test]
+    fn skipping_an_attribute_no_feature_has_is_an_error() {
+        // A typo would otherwise keep the field it meant to drop.
+        let selection = Selection {
+            attributes: Attributes::Except(vec!["b".into(), "nonesuch".into()]),
+            ..Selection::default()
+        };
+        let said = format!("{:#}", read_selecting(TWO, &selection).unwrap_err());
+        assert!(said.contains("nonesuch") && !said.contains("b,"), "{said}");
+    }
+
+    #[test]
+    fn a_geometry_field_is_refused_where_there_is_only_one_geometry() {
+        let selection = Selection {
+            geometry_field: Some("geom".into()),
+            ..Selection::default()
+        };
+        let said = format!("{:#}", read_selecting(TWO, &selection).unwrap_err());
+        assert!(
+            said.contains("--geometry-field is for GeoParquet"),
+            "{said}"
+        );
     }
 
     #[test]
