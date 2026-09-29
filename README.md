@@ -62,6 +62,14 @@ Mercator in metres). Anything else needs to be reprojected first.
 
 A source that declares **no** CRS is read as lon/lat.
 
+If a source's coordinates already are one of those two but it declares
+something else, `--input-crs` says which, and nothing is reprojected. GDA2020 is
+within two metres of WGS 84, for instance:
+
+```
+lyv vicmap.parquet vicmap.pmtiles --input-crs EPSG:4326
+```
+
 ## Why it is fast
 
 Tiles are built **bottom-up**. The source is cut once, at maxzoom, and every

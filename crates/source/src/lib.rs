@@ -102,6 +102,11 @@ pub struct Selection {
     /// `None` is the file's primary column. Other formats have one geometry
     /// per feature, and refuse a name.
     pub geometry_field: Option<String>,
+    /// What the coordinates are, whatever the file declares. Nothing is
+    /// reprojected: for a file whose coordinates already are lon/lat or Web
+    /// Mercator but whose declared CRS is missing, wrong, or one lyv can't
+    /// read. `None` goes by the file.
+    pub input_crs: Option<Crs>,
 }
 
 /// Which attributes to carry. A name listed that no feature has is an error,
@@ -241,7 +246,10 @@ pub fn read_geojson(
     // Known up front, since the collection is parsed whole.
     expect(features.len() as u64);
 
-    let crs = geojson_crs(&document, path)?;
+    let crs = match selection.input_crs {
+        Some(crs) => crs,
+        None => geojson_crs(&document, path)?,
+    };
 
     for (sequence, feature) in features.iter().enumerate() {
         // Numeric ids are kept. Others fall back to the sequence: a hash could
@@ -415,7 +423,9 @@ fn unreadable_crs(path: &Path, named: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "{source} is in {named}, but lyv reads only EPSG:4326 (lon/lat in degrees) \
          and EPSG:3857 (Web Mercator in metres).\nReproject it first:\n    \
-         ogr2ogr -t_srs EPSG:4326 reprojected.{suffix} {source}",
+         ogr2ogr -t_srs EPSG:4326 reprojected.{suffix} {source}\n\
+         Or, if its coordinates already are one of those, say which: \
+         --input-crs EPSG:4326",
         source = path.display(),
     )
 }
@@ -430,6 +440,27 @@ fn crs_of(authority: &str, code: i64, path: &Path) -> Result<Crs> {
         return Err(unreadable_crs(path, &format!("{authority}:{code}")));
     }
     Crs::from_epsg(code).ok_or_else(|| unreadable_crs(path, &format!("EPSG:{code}")))
+}
+
+/// A CRS given by name, for [`Selection::input_crs`]: `EPSG:4326`,
+/// `OGC:CRS84` or `EPSG:3857`, in any spelling a file could use.
+pub fn parse_crs(name: &str) -> Result<Crs> {
+    authority_and_code(name)
+        .and_then(|(authority, code)| {
+            if authority.eq_ignore_ascii_case("OGC") && code == 84 {
+                Some(Crs::Wgs84)
+            } else if authority.eq_ignore_ascii_case("EPSG") {
+                Crs::from_epsg(code)
+            } else {
+                None
+            }
+        })
+        .with_context(|| {
+            format!(
+                "{name:?} isn't a CRS lyv reads: it reads EPSG:4326 (or OGC:CRS84), \
+                 lon/lat in degrees, and EPSG:3857, Web Mercator in metres"
+            )
+        })
 }
 
 /// The authority and code in a CRS name: `EPSG:3857`,
@@ -548,7 +579,10 @@ pub fn read_flatgeobuf(
     }
 
     // Checked before reading any feature.
-    let crs = flatgeobuf_crs(&features.header(), path)?;
+    let crs = match selection.input_crs {
+        Some(crs) => crs,
+        None => flatgeobuf_crs(&features.header(), path)?,
+    };
 
     let mut sequence = 0u64;
     while let Some(feature) = features
@@ -722,7 +756,10 @@ pub fn read_geoparquet(
     // Read from the metadata rather than per batch: GeoParquet requires every
     // chunk of a column to share one CRS, and this way a refusal comes before
     // the first row is decoded.
-    let crs = geoparquet_crs(column.crs.as_ref(), path)?;
+    let crs = match selection.input_crs {
+        Some(crs) => crs,
+        None => geoparquet_crs(column.crs.as_ref(), path)?,
+    };
 
     let reader = builder
         .build()
@@ -1535,6 +1572,81 @@ mod tests {
             message.contains("ogr2ogr"),
             "and how to fix it, got: {message}"
         );
+    }
+
+    #[test]
+    fn an_input_crs_overrides_the_one_a_file_declares() {
+        // GDA2020 is lon/lat, within two metres of WGS 84: refused as declared,
+        // read as lon/lat when told to.
+        let point = r#"{"type":"Feature","properties":{},
+           "geometry":{"type":"Point","coordinates":[174.7,-41.3]}}"#;
+        let fgb = to_fgb_in_crs(
+            &collection(point),
+            flatgeobuf::GeometryType::Point,
+            "EPSG",
+            7844,
+        );
+        let refused = format!(
+            "{:#}",
+            try_read_fgb(&fgb).expect_err("EPSG:7844 as declared")
+        );
+        assert!(
+            refused.contains("--input-crs"),
+            "should offer the flag: {refused}"
+        );
+
+        let mut read = Vec::new();
+        read_flatgeobuf(
+            &fgb,
+            Z,
+            EXTENT,
+            &Selection {
+                input_crs: Some(Crs::Wgs84),
+                ..Selection::default()
+            },
+            &mut |_| {},
+            &mut |f| {
+                read.push(f);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let (x, y) = lyv_core::mercator::project_global(174.7, -41.3, Z, EXTENT);
+        assert_eq!(read[0].parts[0][0], geo_types::Coord { x, y });
+
+        // And the same for GeoJSON's declaration, to Web Mercator.
+        let json = r#"{"type":"FeatureCollection",
+           "crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::2193"}},
+           "features":[{"type":"Feature","properties":{},
+             "geometry":{"type":"Point","coordinates":[0,0]}}]}"#;
+        let selection = Selection {
+            input_crs: Some(Crs::WebMercator),
+            ..Selection::default()
+        };
+        let features = read_selecting(json, &selection).unwrap();
+        let (x, y) = lyv_core::mercator::project_global(0.0, 0.0, 12, EXTENT);
+        assert_eq!(features[0].parts[0][0], geo_types::Coord { x, y });
+    }
+
+    #[test]
+    fn an_input_crs_is_named_as_a_file_would_name_it() {
+        for (name, crs) in [
+            ("EPSG:4326", Crs::Wgs84),
+            ("epsg:4326", Crs::Wgs84),
+            ("OGC:CRS84", Crs::Wgs84),
+            ("CRS84", Crs::Wgs84),
+            ("urn:ogc:def:crs:EPSG::3857", Crs::WebMercator),
+            ("EPSG:3857", Crs::WebMercator),
+        ] {
+            assert_eq!(parse_crs(name).unwrap(), crs, "{name}");
+        }
+        for name in ["EPSG:7844", "4326", "wgs84", ""] {
+            let said = format!("{:#}", parse_crs(name).unwrap_err());
+            assert!(
+                said.contains("EPSG:4326") && said.contains("EPSG:3857"),
+                "{name}: {said}"
+            );
+        }
     }
 
     #[test]

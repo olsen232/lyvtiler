@@ -99,6 +99,7 @@ fn build() -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: 4096,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

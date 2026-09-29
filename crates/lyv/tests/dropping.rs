@@ -65,6 +65,7 @@ fn build(across: i64, limits: Limits) -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: EXTENT,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

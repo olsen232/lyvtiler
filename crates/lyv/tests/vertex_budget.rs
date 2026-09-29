@@ -64,6 +64,7 @@ fn build(max_tile_vertices: usize) -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: EXTENT,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

@@ -76,6 +76,16 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     geometry_field: Option<String>,
 
+    /// What the input's coordinates are, whatever CRS it declares:
+    /// `EPSG:4326` (or `OGC:CRS84`) for lon/lat, `EPSG:3857` for Web Mercator.
+    ///
+    /// Nothing is reprojected. For input whose coordinates already are one of
+    /// those, but whose declared CRS is missing, wrong, or one lyv can't read.
+    /// GDA2020 is within two metres of WGS 84, for instance, and can be read
+    /// as `EPSG:4326` if that's close enough.
+    #[arg(long, value_name = "CRS", value_parser = input_crs)]
+    input_crs: Option<lyv_source::Crs>,
+
     /// Output one line per stage instead of rewriting a line continuously to
     /// show progress updates.
     ///
@@ -410,6 +420,11 @@ fn default_layer_name(output: &std::path::Path) -> Result<String> {
         .context("could not derive a layer name; pass --output-layer")
 }
 
+/// `--input-crs`, parsed as the readers parse a declared CRS.
+fn input_crs(name: &str) -> Result<lyv_source::Crs, String> {
+    lyv_source::parse_crs(name).map_err(|error| error.to_string())
+}
+
 /// Wire the allocator's live-byte counter into the progress line.
 #[cfg(feature = "memory-stats")]
 fn show_memory(_progress: &lyv::Progress) {
@@ -504,6 +519,7 @@ fn main() -> Result<()> {
             _ => lyv::Attributes::All,
         },
         geometry_field: cli.geometry_field,
+        input_crs: cli.input_crs,
         extent: cli.extent,
         maxzoom_extent: Some(maxzoom_extent),
         buffer: cli.buffer,

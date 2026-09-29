@@ -45,6 +45,9 @@ pub struct Options {
     /// The geometry column to read, for a GeoParquet file with more than one.
     /// `None` is the file's primary column.
     pub geometry_field: Option<String>,
+    /// What the input's coordinates are, overriding the CRS it declares.
+    /// Nothing is reprojected. `None` goes by the file.
+    pub input_crs: Option<lyv_source::Crs>,
     pub extent: u32,
     /// Tile resolution at maxzoom, if finer than `extent`. Maxzoom's detail
     /// can't be recovered later, so it's worth spending resolution on. Must be
@@ -610,6 +613,7 @@ fn stream_pass(
                 &lyv_source::Selection {
                     attributes: options.attributes.clone(),
                     geometry_field: options.geometry_field.clone(),
+                    input_crs: options.input_crs,
                 },
                 // Known before the first feature for FlatGeobuf (header) and
                 // GeoJSON (parsed whole).
@@ -2513,6 +2517,7 @@ mod tests {
             output_name: None,
             attributes: Attributes::All,
             geometry_field: None,
+            input_crs: None,
             extent: 4096,
             maxzoom_extent: None,
             ranker: "evenstar".to_string(),

@@ -59,6 +59,7 @@ fn build(rank_depth: u32, limits: Limits) -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: 4096,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

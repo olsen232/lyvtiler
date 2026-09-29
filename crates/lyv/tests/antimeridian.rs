@@ -48,6 +48,7 @@ fn build(max_zoom: u32, buffer: u32) -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: EXTENT,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

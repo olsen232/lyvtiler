@@ -18,6 +18,7 @@ simplification and what to drop by itself.
 | `--skip-attributes <A,B,C>` | none | Carry every attribute except these. Can't be combined with `--attributes`. |
 | `--no-attributes` | off | Carry no attributes at all: geometry only. |
 | `--geometry-field <NAME>` | the primary column | Which geometry column to read, for GeoParquet with more than one. |
+| `--input-crs <CRS>` | what the file declares | What the coordinates are: `EPSG:4326` (or `OGC:CRS84`) or `EPSG:3857`. Nothing is reprojected. |
 
 ## Running
 

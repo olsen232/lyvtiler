@@ -53,6 +53,7 @@ fn build(extension: &str, write_input: impl FnOnce(&Path)) -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: EXTENT,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

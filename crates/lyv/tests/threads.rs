@@ -81,6 +81,7 @@ fn build_from(threads: usize, body: String) -> Built {
         output_name: None,
         attributes: lyv::Attributes::All,
         geometry_field: None,
+        input_crs: None,
         extent: 4096,
         maxzoom_extent: Some(8192),
         ranker: "evenstar".to_string(),
