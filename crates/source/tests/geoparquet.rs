@@ -304,3 +304,128 @@ fn asking_for_a_column_that_cannot_be_carried_is_an_error() {
     let said = format!("{:#}", result.expect_err("label can't be carried"));
     assert!(said.contains("label"), "{said}");
 }
+
+/// One WKB column: its name, the `geometry_types` it declares, and its rows.
+type DeclaredColumn<'a> = (&'a str, &'a [&'a str], Vec<geo_types::Geometry<f64>>);
+
+/// A Parquet file of WKB geometry columns with a hand-written `geo` key, so
+/// the declared `geometry_types` can disagree with the data, as they can in
+/// files from other writers.
+fn declared_wkb(dir: &std::path::Path, columns: &[DeclaredColumn]) -> std::path::PathBuf {
+    use arrow_array::ArrayRef;
+    use geoarrow_array::builder::WkbBuilder;
+    use geoarrow_schema::WkbType;
+    use parquet::file::metadata::KeyValue;
+
+    let mut fields = Vec::new();
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+    let mut declared = serde_json::Map::new();
+    for (name, types, rows) in columns {
+        let rows: Vec<Option<geo_types::Geometry<f64>>> = rows.iter().cloned().map(Some).collect();
+        let wkb =
+            WkbBuilder::<i32>::from_nullable_geometries(&rows, WkbType::new(Default::default()))
+                .unwrap()
+                .finish();
+        fields.push(Field::new(*name, DataType::Binary, true));
+        arrays.push(wkb.to_array_ref());
+        declared.insert(
+            (*name).to_string(),
+            serde_json::json!({"encoding": "WKB", "geometry_types": types}),
+        );
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    let geo = serde_json::json!({
+        "version": "1.1.0",
+        "primary_column": columns[0].0,
+        "columns": declared,
+    });
+
+    let path = dir.join("declared.parquet");
+    let mut writer =
+        ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.append_key_value_metadata(KeyValue::new("geo".to_string(), geo.to_string()));
+    writer.close().unwrap();
+    path
+}
+
+fn wkt(text: &str) -> geo_types::Geometry<f64> {
+    use std::str::FromStr;
+    wkt::Wkt::<f64>::from_str(text).unwrap().try_into().unwrap()
+}
+
+#[test]
+fn a_column_declared_polygon_may_hold_multipolygons() {
+    // The staging failure: a single-type reader stopped at the first row that
+    // wasn't what the metadata said.
+    let dir = tempfile::tempdir().unwrap();
+    let path = declared_wkb(
+        dir.path(),
+        &[(
+            "geometry",
+            &["Polygon"],
+            vec![
+                wkt("POLYGON((174 -41, 175 -41, 175 -40, 174 -41))"),
+                wkt(
+                    "MULTIPOLYGON(((174 -41, 175 -41, 175 -40, 174 -41)),((176 -41, 177 -41, 177 -40, 176 -41)))",
+                ),
+            ],
+        )],
+    );
+    let features = read_field(&path, None).unwrap();
+    assert_eq!(features.len(), 2);
+    assert!(features.iter().all(|f| f.kind == Kind::Rings));
+    assert_eq!(features[1].parts.len(), 2, "both polygons of the second");
+}
+
+#[test]
+fn a_column_may_mix_points_lines_and_polygons_whatever_it_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = declared_wkb(
+        dir.path(),
+        &[(
+            "geometry",
+            &["Point"],
+            vec![
+                wkt("POINT(174.5 -41)"),
+                wkt("LINESTRING(174 -41, 175 -40)"),
+                wkt("POLYGON((174 -41, 175 -41, 175 -40, 174 -41))"),
+                wkt("MULTIPOINT((174 -41), (175 -40))"),
+            ],
+        )],
+    );
+    let kinds: Vec<Kind> = read_field(&path, None)
+        .unwrap()
+        .iter()
+        .map(|f| f.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![Kind::Points, Kind::Lines, Kind::Rings, Kind::Points]
+    );
+}
+
+#[test]
+fn an_unread_geometry_column_that_misdeclares_itself_is_left_alone() {
+    // Choosing `labels` used to parse `geometry` too, and fail on its lie.
+    let dir = tempfile::tempdir().unwrap();
+    let path = declared_wkb(
+        dir.path(),
+        &[
+            (
+                "geometry",
+                &["Polygon"],
+                vec![wkt("MULTIPOLYGON(((174 -41, 175 -41, 175 -40, 174 -41)))")],
+            ),
+            ("labels", &["Point"], vec![wkt("POINT(174.5 -40.8)")]),
+        ],
+    );
+    let features = read_field(&path, Some("labels")).unwrap();
+    assert_eq!(features.len(), 1);
+    assert_eq!(features[0].kind, Kind::Points);
+    assert!(
+        features[0].properties.is_empty(),
+        "the other column isn't an attribute"
+    );
+}

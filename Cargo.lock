@@ -1381,6 +1381,7 @@ dependencies = [
  "parquet",
  "serde_json",
  "tempfile",
+ "wkt",
 ]
 
 [[package]]

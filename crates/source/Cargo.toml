@@ -24,3 +24,4 @@ geo-traits = "0.3.0"
 
 [dev-dependencies]
 tempfile.workspace = true
+wkt = "0.14"

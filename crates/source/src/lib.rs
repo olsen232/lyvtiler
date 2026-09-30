@@ -31,11 +31,31 @@ pub struct Skipped {
     /// Rings that enclosed nothing on the maxzoom grid: slivers narrower than a
     /// unit.
     pub collapsed: u64,
+    /// GeometryCollections that lost members: a feature has one kind, so only
+    /// the members of the collection's highest dimension are kept.
+    pub collection_members: u64,
 }
 
 impl Skipped {
     pub fn is_empty(&self) -> bool {
-        self.no_geometry == 0 && self.collapsed == 0
+        self.no_geometry == 0 && self.collapsed == 0 && self.collection_members == 0
+    }
+
+    /// Record what a feature's geometry lost, and hand back what's left to
+    /// keep, if anything is.
+    fn keep(&mut self, projected: Projected) -> Option<(Kind, Vec<Vec<Coord<i64>>>)> {
+        if projected.dropped_members {
+            self.collection_members += 1;
+        }
+        let Some(kind) = projected.kind else {
+            self.no_geometry += 1;
+            return None;
+        };
+        if projected.parts.is_empty() {
+            self.count(kind);
+            return None;
+        }
+        Some((kind, projected.parts))
     }
 
     /// Record a feature left with no parts. Only rings can collapse; an empty
@@ -62,7 +82,29 @@ impl Skipped {
         if self.no_geometry > 0 {
             parts.push(format!("{} with no geometry", self.no_geometry));
         }
-        Some(format!("skipped {}", parts.join(", ")))
+        let mut line = format!("skipped {}", parts.join(", "));
+        if self.collection_members > 0 {
+            let lost = format!(
+                "{} GeometryCollection{} kept only {} highest-dimension members",
+                self.collection_members,
+                if self.collection_members == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                if self.collection_members == 1 {
+                    "its"
+                } else {
+                    "their"
+                },
+            );
+            line = if parts.is_empty() {
+                lost
+            } else {
+                format!("{line}; {lost}")
+            };
+        }
+        Some(line)
     }
 }
 
@@ -264,12 +306,11 @@ pub fn read_geojson(
             continue;
         };
 
-        let (kind, parts) = geometry_parts(geometry, crs, maxzoom, extent)
+        let projected = geometry_parts(geometry, crs, maxzoom, extent)
             .with_context(|| format!("in feature {sequence} of {}", path.display()))?;
-        if parts.is_empty() {
-            skipped.count(kind);
+        let Some((kind, parts)) = skipped.keep(projected) else {
             continue;
-        }
+        };
         let mut properties = read_properties(feature.get("properties"), &wanted);
         properties.sort_by(|a, b| a.0.cmp(&b.0));
         wanted.note(&properties);
@@ -290,23 +331,34 @@ fn geometry_parts(
     crs: Crs,
     maxzoom: u32,
     extent: u32,
-) -> Result<(Kind, Vec<Vec<Coord<i64>>>)> {
+) -> Result<Projected> {
     use geozero::ToGeo;
 
     let decoded = geozero::geojson::GeoJson(&geometry.to_string())
         .to_geo()
         .context("reading the geometry")?;
-    parts_of(decoded, crs, maxzoom, extent)
+    Ok(parts_of(decoded, crs, maxzoom, extent))
+}
+
+/// A geometry projected onto the global grid.
+struct Projected {
+    /// `None` for an empty GeometryCollection: nothing to say what it was.
+    kind: Option<Kind>,
+    parts: Vec<Vec<Coord<i64>>>,
+    /// Whether a GeometryCollection lost members of a lower dimension than
+    /// its highest.
+    dropped_members: bool,
 }
 
 /// Project a decoded geometry onto the global grid, and say what kind it is.
-/// Shared by every format.
-fn parts_of(
-    decoded: geo_types::Geometry<f64>,
-    crs: Crs,
-    maxzoom: u32,
-    extent: u32,
-) -> Result<(Kind, Vec<Vec<Coord<i64>>>)> {
+/// Shared by every format, and whatever a format declares: each feature's
+/// geometry is taken as it comes.
+///
+/// A `Line`, `Rect` or `Triangle` is the linestring or polygon it is. A
+/// GeometryCollection keeps only its members of the highest dimension
+/// (polygons, then lines, then points), nested collections included, since a
+/// feature has one kind; the loss is counted.
+fn parts_of(decoded: geo_types::Geometry<f64>, crs: Crs, maxzoom: u32, extent: u32) -> Projected {
     use geo_types::Geometry;
 
     let project = |line: &geo_types::LineString<f64>| -> Vec<Coord<i64>> {
@@ -324,29 +376,70 @@ fn parts_of(
         vec![Coord { x, y }]
     };
 
+    let whole = |kind: Kind, parts: Vec<Vec<Coord<i64>>>| Projected {
+        kind: Some(kind),
+        parts,
+        dropped_members: false,
+    };
+
     match decoded {
         // One single-coordinate part per point; a MultiPoint is one feature
         // with several parts.
-        Geometry::Point(point) => Ok((Kind::Points, vec![at(&point)])),
-        Geometry::MultiPoint(points) => Ok((Kind::Points, points.0.iter().map(at).collect())),
-        Geometry::LineString(line) => Ok((Kind::Lines, keep_lines(vec![project(&line)]))),
-        Geometry::MultiLineString(lines) => Ok((
+        Geometry::Point(point) => whole(Kind::Points, vec![at(&point)]),
+        Geometry::MultiPoint(points) => whole(Kind::Points, points.0.iter().map(at).collect()),
+        Geometry::LineString(line) => whole(Kind::Lines, keep_lines(vec![project(&line)])),
+        Geometry::MultiLineString(lines) => whole(
             Kind::Lines,
             keep_lines(lines.0.iter().map(project).collect()),
-        )),
-        Geometry::Polygon(polygon) => Ok((Kind::Rings, rings_of(&polygon, &project))),
+        ),
+        Geometry::Polygon(polygon) => whole(Kind::Rings, rings_of(&polygon, &project)),
         Geometry::MultiPolygon(polygons) => {
             let mut rings = Vec::new();
             for polygon in &polygons.0 {
                 rings.extend(rings_of(polygon, &project));
             }
-            Ok((Kind::Rings, rings))
+            whole(Kind::Rings, rings)
         }
-        other => bail!(
-            "found {}, but only Point, MultiPoint, LineString, MultiLineString, \
-             Polygon and MultiPolygon are supported so far",
-            describe(&other)
+        Geometry::Line(line) => whole(
+            Kind::Lines,
+            keep_lines(vec![project(&geo_types::LineString::from(vec![
+                line.start, line.end,
+            ]))]),
         ),
+        Geometry::Rect(rect) => whole(Kind::Rings, rings_of(&rect.to_polygon(), &project)),
+        Geometry::Triangle(triangle) => {
+            whole(Kind::Rings, rings_of(&triangle.to_polygon(), &project))
+        }
+        Geometry::GeometryCollection(collection) => {
+            let members: Vec<Projected> = collection
+                .0
+                .into_iter()
+                .map(|member| parts_of(member, crs, maxzoom, extent))
+                .collect();
+            let rank = |kind: Kind| match kind {
+                Kind::Points => 0,
+                Kind::Lines => 1,
+                Kind::Rings => 2,
+            };
+            let highest = members
+                .iter()
+                .filter_map(|m| m.kind)
+                .max_by_key(|k| rank(*k));
+            let mut out = Projected {
+                kind: highest,
+                parts: Vec::new(),
+                dropped_members: false,
+            };
+            for member in members {
+                out.dropped_members |= member.dropped_members;
+                match member.kind {
+                    Some(kind) if Some(kind) == highest => out.parts.extend(member.parts),
+                    Some(_) => out.dropped_members = true,
+                    None => {}
+                }
+            }
+            out
+        }
     }
 }
 
@@ -602,13 +695,10 @@ pub fn read_flatgeobuf(
             .to_geo()
             .with_context(|| format!("in feature {sequence} of {}", path.display()))?;
 
-        let (kind, parts) = parts_of(geometry, crs, maxzoom, extent)
-            .with_context(|| format!("in feature {sequence} of {}", path.display()))?;
-        if parts.is_empty() {
-            skipped.count(kind);
+        let Some((kind, parts)) = skipped.keep(parts_of(geometry, crs, maxzoom, extent)) else {
             sequence += 1;
             continue;
-        }
+        };
 
         // FlatGeobuf has no feature ids, so the position in the file is used.
         let mut collector = Properties::new(&wanted);
@@ -731,11 +821,6 @@ pub fn read_geoparquet(
                 path.display()
             )
         })?;
-    let schema = builder
-        .geoarrow_schema(&geo, true, Default::default())
-        .map_err(|error| anyhow::anyhow!("{error}"))
-        .with_context(|| format!("reading the geometry schema of {}", path.display()))?;
-
     // The primary column unless told otherwise. GeoParquet lists every
     // geometry column in its metadata, so a name that isn't one is refused
     // here, with the ones there are.
@@ -752,6 +837,9 @@ pub fn read_geoparquet(
             names.join(", ")
         );
     };
+
+    let schema = target_schema(&builder, &geo, &geometry_column)
+        .with_context(|| format!("reading the geometry schema of {}", path.display()))?;
 
     // Read from the metadata rather than per batch: GeoParquet requires every
     // chunk of a column to share one CRS, and this way a refusal comes before
@@ -785,13 +873,10 @@ pub fn read_geoparquet(
                 sequence += 1;
                 continue;
             };
-            let (kind, parts) = parts_of(geometry, crs, maxzoom, extent)
-                .with_context(|| format!("in row {sequence} of {}", path.display()))?;
-            if parts.is_empty() {
-                skipped.count(kind);
+            let Some((kind, parts)) = skipped.keep(parts_of(geometry, crs, maxzoom, extent)) else {
                 sequence += 1;
                 continue;
-            }
+            };
             let mut properties: Vec<(String, Value)> = properties
                 .iter()
                 .filter_map(|(name, values)| values[row].clone().map(|value| (name.clone(), value)))
@@ -811,6 +896,54 @@ pub fn read_geoparquet(
     }
     wanted.check(path)?;
     Ok(skipped)
+}
+
+/// The schema to read a GeoParquet file into: `geometry_column` tagged as
+/// geometry, every other column as stored.
+///
+/// A WKB column stays WKB, decoded row by row, whatever its `geometry_types`
+/// declares. That declaration can be wrong (a "Polygon" column holding
+/// MultiPolygons), and parsing to the single native type it names fails on the
+/// first row that differs. Staying WKB is also the faster read: every row ends
+/// up as `geo_types`, and a native array would be a second copy on the way
+/// (vicmap, 3.5M polygons: 3.9 s against 5.0 s for the mixed native type).
+/// A native column is its declared type by construction. Other geometry
+/// columns aren't parsed at all: lyv never reads them, and a wrong declaration
+/// there would fail the read too.
+fn target_schema(
+    builder: &parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<std::fs::File>,
+    geo: &geoparquet::metadata::GeoParquetMetadata,
+    geometry_column: &str,
+) -> Result<arrow_schema::SchemaRef> {
+    use geoarrow_schema::{GeoArrowType, Metadata, WkbType};
+    use geoparquet::metadata::GeoParquetColumnEncoding;
+    use geoparquet::reader::GeoParquetReaderBuilder;
+
+    let stored = builder.schema();
+    let native = builder
+        .geoarrow_schema(geo, true, Default::default())
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let column = &geo.columns[geometry_column];
+
+    let fields: Vec<arrow_schema::FieldRef> = stored
+        .fields()
+        .iter()
+        .zip(native.fields())
+        .map(|(stored, native)| {
+            if stored.name() != geometry_column {
+                stored.clone()
+            } else if column.encoding == GeoParquetColumnEncoding::WKB {
+                let metadata = std::sync::Arc::new(Metadata::from(column.clone()));
+                let wkb = GeoArrowType::Wkb(WkbType::new(metadata));
+                std::sync::Arc::new(wkb.to_field(stored.name(), stored.is_nullable()))
+            } else {
+                native.clone()
+            }
+        })
+        .collect();
+    Ok(std::sync::Arc::new(
+        arrow_schema::Schema::new_with_metadata(fields, stored.metadata().clone()),
+    ))
 }
 
 /// Every geometry in a GeoArrow column, as `geo_types`.
@@ -991,22 +1124,6 @@ fn to_value(value: &serde_json::Value) -> Option<Value> {
         }
         nested @ (Json::Array(_) | Json::Object(_)) => Value::Str(nested.to_string()),
     })
-}
-
-fn describe(geometry: &geo_types::Geometry<f64>) -> &'static str {
-    use geo_types::Geometry::*;
-    match geometry {
-        Point(_) => "a Point",
-        Line(_) => "a Line",
-        LineString(_) => "a LineString",
-        Polygon(_) => "a Polygon",
-        MultiPoint(_) => "a MultiPoint",
-        MultiLineString(_) => "a MultiLineString",
-        MultiPolygon(_) => "a MultiPolygon",
-        GeometryCollection(_) => "a GeometryCollection",
-        Rect(_) => "a Rect",
-        Triangle(_) => "a Triangle",
-    }
 }
 
 #[cfg(test)]
@@ -1241,25 +1358,47 @@ mod tests {
     }
 
     #[test]
-    fn a_geometry_we_cannot_read_is_refused_with_a_clear_message() {
-        // A mixed collection has no single kind. Refuse rather than drop half
-        // of it.
+    fn a_geometry_collection_keeps_its_highest_dimension() {
+        // A feature has one kind: the polygon stays, the point and line go, and
+        // that's counted rather than silent. Nesting is flattened.
         let json = collection(
             r#"{"type":"Feature","properties":{},"geometry":
                {"type":"GeometryCollection","geometries":[
-                 {"type":"Point","coordinates":[1,2]}]}}"#,
+                 {"type":"Point","coordinates":[1,2]},
+                 {"type":"GeometryCollection","geometries":[
+                   {"type":"LineString","coordinates":[[0,0],[1,1]]},
+                   {"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}]}]}}"#,
         );
-        let error = read(&json).expect_err("should refuse");
-        // `{:#}` shows the layered context: which feature, then what was wrong.
-        let message = format!("{error:#}").to_lowercase();
-        assert!(
-            message.contains("geometrycollection") && message.contains("polygon"),
-            "should name what it found and what it supports, got: {message}"
+        let (features, skipped) = read_counting(&json).unwrap();
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].kind, Kind::Rings);
+        assert_eq!(skipped.collection_members, 1);
+        assert!(skipped.report(12).unwrap().contains("GeometryCollection"));
+    }
+
+    #[test]
+    fn a_collection_of_one_kind_loses_nothing() {
+        let json = collection(
+            r#"{"type":"Feature","properties":{},"geometry":
+               {"type":"GeometryCollection","geometries":[
+                 {"type":"Point","coordinates":[1,2]},
+                 {"type":"Point","coordinates":[3,4]}]}}"#,
         );
-        assert!(
-            message.contains("feature 0"),
-            "and which feature it was, got: {message}"
+        let (features, skipped) = read_counting(&json).unwrap();
+        assert_eq!(features[0].kind, Kind::Points);
+        assert_eq!(features[0].parts.len(), 2);
+        assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    #[test]
+    fn an_empty_collection_has_no_geometry() {
+        let json = collection(
+            r#"{"type":"Feature","properties":{},"geometry":
+               {"type":"GeometryCollection","geometries":[]}}"#,
         );
+        let (features, skipped) = read_counting(&json).unwrap();
+        assert!(features.is_empty());
+        assert_eq!(skipped.no_geometry, 1);
     }
 
     // -----------------------------------------------------------------------

@@ -26,6 +26,12 @@ use lyv::Options;
 struct Cli {
     /// Source file. FlatGeobuf for `.fgb`, GeoParquet for `.parquet`,
     /// GeoJSON for anything else.
+    ///
+    /// Each feature's geometry is read as it is, whatever type the file
+    /// declares, and a layer may mix points, lines and polygons. MVT doesn't
+    /// support single features of mixed type, so a GeometryCollection becomes
+    /// either a multipolygon, multiline or multipoint (highest-dimension gets
+    /// priority).
     input: PathBuf,
 
     /// Tileset to write. `.pmtiles` or `.mbtiles`, chosen by extension.
