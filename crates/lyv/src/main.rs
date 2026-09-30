@@ -96,13 +96,22 @@ struct Cli {
     /// show progress updates.
     ///
     /// Makes for much shorter log files, otherwise the log has at least
-    /// one line for every half-second progress update.
+    /// one line for every progress update (see `--progress-every`).
     #[arg(short, long)]
     quiet: bool,
 
     /// Output nothing at all on stderr.
     #[arg(long, conflicts_with = "quiet")]
     silent: bool,
+
+    /// How often to update the progress line, in seconds.
+    ///
+    /// In a log, every update is a line, so a longer interval makes for a
+    /// shorter log: `--progress-every 10` gives one every ten seconds. Memory
+    /// shown by `--memory` is sampled at each update too, so a spike between
+    /// updates is missed; the peak at the end of the run is exact.
+    #[arg(long, value_name = "SECONDS", default_value_t = 0.5, value_parser = seconds)]
+    progress_every: f64,
 
     /// How many threads to use. Zero chooses for you.
     ///
@@ -426,6 +435,14 @@ fn default_layer_name(output: &std::path::Path) -> Result<String> {
         .context("could not derive a layer name; pass --output-layer")
 }
 
+/// A positive number of seconds.
+fn seconds(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(seconds) if seconds > 0.0 && seconds.is_finite() => Ok(seconds),
+        _ => Err(format!("{text:?} isn't a positive number of seconds")),
+    }
+}
+
 /// `--input-crs`, parsed as the readers parse a declared CRS.
 fn input_crs(name: &str) -> Result<lyv_source::Crs, String> {
     lyv_source::parse_crs(name).map_err(|error| error.to_string())
@@ -473,6 +490,7 @@ fn main() -> Result<()> {
             _ => lyv::Verbosity::Normal,
         },
         cli.trace,
+        std::time::Duration::from_secs_f64(cli.progress_every),
     );
 
     // Maxzoom is the finest level, so its extent can't be below `--extent`.
@@ -595,6 +613,20 @@ mod tests {
     use clap::Parser;
     use std::path::Path;
     use std::time::Duration;
+
+    #[test]
+    fn progress_every_takes_a_positive_number_of_seconds() {
+        let parse = |value: &str| {
+            Cli::try_parse_from(["lyv", "in.fgb", "out.pmtiles", "--progress-every", value])
+        };
+        assert_eq!(parse("10").unwrap().progress_every, 10.0);
+        assert_eq!(parse("0.25").unwrap().progress_every, 0.25);
+        for bad in ["0", "-1", "ten", "inf"] {
+            assert!(parse(bad).is_err(), "{bad} should be refused");
+        }
+        let default = Cli::try_parse_from(["lyv", "in.fgb", "out.pmtiles"]).unwrap();
+        assert_eq!(default.progress_every, 0.5);
+    }
 
     #[test]
     fn attributes_can_be_listed_or_skipped_but_not_both() {

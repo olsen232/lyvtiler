@@ -5,9 +5,10 @@ Measured with `--memory`, which needs a binary built with
 the resident set — on every progress line: the stage's peak on the line that
 stays, the current figure on the line being redrawn.
 
-It samples every 500 ms and at each end of a stage, so a spike that lives
-entirely between samples is missed; one 977 MB spike hid that way. The exact
-peak is the figure printed at the end of the run. `--memory` also prints a
+It samples at each progress update (every 0.5s, or `--progress-every`) and
+at each end of a stage, so a spike that lives entirely between samples is
+missed; one 977 MB spike hid that way. The exact peak is the figure printed at
+the end of the run. `--memory` also prints a
 breakdown of what is alive after reading (`lyv::footprint`).
 
 A stage line shows that stage's *peak*, not what it left behind, so one line

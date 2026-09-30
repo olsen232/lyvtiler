@@ -8,22 +8,24 @@
 //! a stage overwrites the line in place. Every stage shows "N of M" where it
 //! can.
 //!
-//! Redrawn when something changes, never on a timer alone, and at most twice a
-//! second (see `REDRAW`). Output is the same whether or not stderr is a
-//! terminal (see [`Verbosity`]).
+//! Redrawn at most once an interval, every 0.5s by default (see
+//! [`DEFAULT_EVERY`]), and on a timer too so the clock keeps moving. Output is
+//! the same whether or not stderr is a terminal (see [`Verbosity`]).
 
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// The shortest gap between redraws. Twice a second: faster, a burst of small
-/// tiles blurs the counter and a slow one freezes it, which reads as stutter.
-/// In a log, every redraw is a line.
-const REDRAW: Duration = Duration::from_millis(500);
+/// The shortest gap between redraws, unless told otherwise: 0.5s. Faster, a
+/// burst of small tiles blurs the counter and a slow one freezes it, which
+/// reads as stutter. In a log, every redraw is a line, which is why it
+/// can be longer.
+pub const DEFAULT_EVERY: Duration = Duration::from_millis(500);
 
-/// [`REDRAW`] in nanoseconds, for comparing without a lock.
-const REDRAW_NANOS: u64 = REDRAW.as_nanos() as u64;
+/// The longest the ticker sleeps, 0.25s, however long the interval, so a
+/// finished run isn't kept waiting for it to notice.
+const LONGEST_SLEEP: Duration = Duration::from_millis(250);
 
 /// The four parts of a run, by share of the time: reading 35%, ingest 10%,
 /// climb 25%, encoding 30%, measured on floodplains at the default worker count
@@ -117,6 +119,8 @@ struct Shared {
     /// The most memory seen this stage, in bytes. Sampled at each redraw, so a
     /// spike between samples is missed; the end-of-run figure is exact.
     stage_peak: AtomicU64,
+    /// The shortest gap between redraws, in nanoseconds.
+    every: u64,
     /// How many of this stage's unit are done.
     count: AtomicU64,
     /// How many are expected, when that is known. Zero means unknown.
@@ -173,13 +177,13 @@ struct Line {
 }
 
 impl Progress {
-    /// Reports to stderr (see [`Verbosity`]).
-    pub fn to_stderr(verbosity: Verbosity, tracing: bool) -> Self {
-        Self::new(verbosity, tracing)
+    /// Reports to stderr (see [`Verbosity`]), redrawing at most once `every`.
+    pub fn to_stderr(verbosity: Verbosity, tracing: bool, every: Duration) -> Self {
+        Self::new(verbosity, tracing, every)
     }
     /// Says nothing. For tests, and for `--silent`.
     pub fn silent() -> Self {
-        Self::new(Verbosity::Silent, false)
+        Self::new(Verbosity::Silent, false, DEFAULT_EVERY)
     }
     /// Stop drawing, so the closing lines are not overwritten.
     pub fn done(&self) {
@@ -187,7 +191,7 @@ impl Progress {
         self.inner.close();
         self.inner.running.store(false, Ordering::Relaxed);
     }
-    fn new(verbosity: Verbosity, tracing: bool) -> Self {
+    fn new(verbosity: Verbosity, tracing: bool, every: Duration) -> Self {
         // Only the redrawing mode has anything for a timer to do.
         let drawing = verbosity == Verbosity::Normal;
         let inner = std::sync::Arc::new(Shared {
@@ -195,6 +199,7 @@ impl Progress {
             tracing,
             running: std::sync::atomic::AtomicBool::new(drawing),
             stage_peak: AtomicU64::new(0),
+            every: every.as_nanos() as u64,
             count: AtomicU64::new(0),
             total: AtomicU64::new(0),
             epoch: Instant::now(),
@@ -224,7 +229,7 @@ impl Progress {
                 while inner.running.load(Ordering::Relaxed) {
                     // Half the interval, so a deadline is never missed by a
                     // whole one.
-                    std::thread::sleep(REDRAW / 2);
+                    std::thread::sleep((every / 2).min(LONGEST_SLEEP));
                     inner.render(false, false);
                 }
             })
@@ -473,8 +478,7 @@ impl Shared {
         // Checked before the lock: this runs per feature on every thread, and
         // almost never has anything to do.
         let now = self.epoch.elapsed().as_nanos() as u64;
-        let due =
-            force || now.saturating_sub(self.drawn_at.load(Ordering::Relaxed)) >= REDRAW_NANOS;
+        let due = force || now.saturating_sub(self.drawn_at.load(Ordering::Relaxed)) >= self.every;
         if due {
             self.drawn_at.store(now, Ordering::Relaxed);
             // Sampled here, since `--quiet` draws nothing until a stage ends.
@@ -616,6 +620,41 @@ mod tests {
         let taken = started.elapsed();
         assert_eq!(progress.counted(), 10_000_000);
         assert!(taken < Duration::from_secs(2), "ten million took {taken:?}");
+    }
+
+    #[test]
+    fn nothing_is_redrawn_until_the_interval_has_passed() {
+        // `--quiet`, so nothing is written, but the redraw clock still runs.
+        let long = Progress::to_stderr(Verbosity::Quiet, false, Duration::from_secs(3600));
+        let short = Progress::to_stderr(Verbosity::Quiet, false, Duration::from_nanos(1));
+        let drawn = |progress: &Progress| progress.inner.drawn_at.load(Ordering::Relaxed);
+        let mut at_stage = Vec::new();
+        for progress in [&long, &short] {
+            // Starting a stage always draws.
+            progress.stage("counting", Some("things"));
+            at_stage.push(drawn(progress));
+            std::thread::sleep(Duration::from_millis(5));
+            for _ in 0..1000 {
+                progress.item();
+            }
+        }
+        assert_eq!(drawn(&long), at_stage[0], "an hour hasn't passed");
+        assert!(drawn(&short) > at_stage[1], "a nanosecond has");
+    }
+
+    #[test]
+    fn a_long_interval_does_not_hold_up_the_end_of_a_run() {
+        // The ticker sleeps half an interval at most 0.25s, so dropping the
+        // reporter doesn't wait out a long one.
+        let started = Instant::now();
+        let progress = Progress::to_stderr(Verbosity::Normal, false, Duration::from_secs(60));
+        progress.done();
+        drop(progress);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

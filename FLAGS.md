@@ -26,6 +26,7 @@ simplification and what to drop by itself.
 |---|---|---|
 | `-q`, `--quiet` | off | Output one line per stage instead of rewriting a line continuously to show progress updates. |
 | `--silent` | off | Output nothing at all on stderr. |
+| `--progress-every <SECONDS>` | 0.5 | How often to update the progress line. In a log each update is a line, so longer makes a shorter log. |
 | `-j`, `--threads <N>` | cores | How many threads to use. Zero chooses for you. |
 | `--store <PATH>` | beside the output | Where to keep the intermediate pyramid. |
 | `--keep-store` | off | Leave the store behind instead of deleting it on success. |
