@@ -361,14 +361,18 @@ struct Projected {
 fn parts_of(decoded: geo_types::Geometry<f64>, crs: Crs, maxzoom: u32, extent: u32) -> Projected {
     use geo_types::Geometry;
 
+    let world = i64::from(extent) << maxzoom;
     let project = |line: &geo_types::LineString<f64>| -> Vec<Coord<i64>> {
-        line.0
+        let mut points: Vec<Coord<i64>> = line
+            .0
             .iter()
             .map(|c| {
                 let (x, y) = crs.project_global(c.x, c.y, maxzoom, extent);
                 Coord { x, y }
             })
-            .collect()
+            .collect();
+        short_way(&mut points, world);
+        points
     };
 
     let at = |point: &geo_types::Point<f64>| -> Vec<Coord<i64>> {
@@ -440,6 +444,38 @@ fn parts_of(decoded: geo_types::Geometry<f64>, crs: Crs, maxzoom: u32, extent: u
             }
             out
         }
+    }
+}
+
+/// Take every step of a line or ring the short way round the world.
+///
+/// A step of more than half the world crosses the antimeridian: from 179.9 to
+/// -179.9, or across a seam written as 180 then -180. Taken literally it runs
+/// the long way, a line right round the world. Instead everything after it is
+/// shifted by a world, so longitude runs on past 180, which the cut wraps into
+/// the right column. Nothing is allowed to go more than half the world, so a
+/// ring that goes right round it, as Antarctica's does, can't be drawn.
+fn short_way(points: &mut [Coord<i64>], world: i64) {
+    let mut shift = 0;
+    let mut previous = match points.first() {
+        Some(first) => first.x,
+        None => return,
+    };
+    let half = world / 2;
+    for point in points.iter_mut().skip(1) {
+        // Measured on the coordinates as given, before any shift.
+        let mut step = point.x - previous;
+        previous = point.x;
+        // Exactly half the world is ambiguous, and stays as it is.
+        while step > half {
+            step -= world;
+            shift -= world;
+        }
+        while step < -half {
+            step += world;
+            shift += world;
+        }
+        point.x += shift;
     }
 }
 
@@ -1355,6 +1391,54 @@ mod tests {
     fn a_null_geometry_is_skipped() {
         let json = collection(r#"{"type":"Feature","properties":{},"geometry":null}"#);
         assert_eq!(read(&json).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn every_step_goes_the_short_way() {
+        // A world of 100: 90 to 10 is a step of 20 east, across the edge.
+        let xs = |points: &[Coord<i64>]| points.iter().map(|p| p.x).collect::<Vec<_>>();
+        let line = |xs: &[i64]| xs.iter().map(|&x| Coord { x, y: 0 }).collect::<Vec<_>>();
+
+        let mut across = line(&[80, 90, 10, 20]);
+        short_way(&mut across, 100);
+        assert_eq!(xs(&across), vec![80, 90, 110, 120]);
+
+        // Back again, and westward from the start.
+        let mut there_and_back = line(&[90, 10, 90]);
+        short_way(&mut there_and_back, 100);
+        assert_eq!(xs(&there_and_back), vec![90, 110, 90]);
+        let mut west = line(&[10, 90]);
+        short_way(&mut west, 100);
+        assert_eq!(xs(&west), vec![10, -10]);
+
+        // Half the world or less is left alone.
+        let mut half = line(&[0, 50, 0]);
+        short_way(&mut half, 100);
+        assert_eq!(xs(&half), vec![0, 50, 0]);
+    }
+
+    #[test]
+    fn a_line_across_the_antimeridian_is_read_the_short_way() {
+        // Both ways sources write it: a direct step, and a seam at 180 then
+        // -180 in the same part.
+        let project = |lon: f64, lat: f64| {
+            let (x, y) = lyv_core::mercator::project_global(lon, lat, Z, EXTENT);
+            Coord { x, y }
+        };
+        let read_line = |coordinates: &str| {
+            let json = collection(&format!(
+                r#"{{"type":"Feature","properties":{{}},"geometry":
+                   {{"type":"LineString","coordinates":{coordinates}}}}}"#
+            ));
+            read(&json).unwrap().remove(0).parts.remove(0)
+        };
+
+        let direct = read_line("[[179,-41],[-179,-41]]");
+        assert_eq!(direct, vec![project(179.0, -41.0), project(181.0, -41.0)]);
+
+        let seam = read_line("[[179.9,-41],[180,-41.1],[-180,-41.1],[-179.9,-41.2]]");
+        assert_eq!(seam[1], seam[2], "the seam's two sides are one point");
+        assert_eq!(seam[3], project(180.1, -41.2));
     }
 
     #[test]

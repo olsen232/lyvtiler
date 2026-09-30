@@ -183,13 +183,19 @@ where clipping against every candidate tile is O(V × T).
 - **Crossings round, not truncate**, or every crossing drifts the same way.
 - **`cut_ring` splices** the first and last chain when both land in one tile,
   since a ring's first vertex is usually mid-tile.
+- **Every step goes the short way.** A step of more than half the world, like
+  179.9 to -179.9 or a seam written as 180 then -180, crosses the antimeridian;
+  read literally it's a line right round the world. The rest of the line or
+  ring is shifted by a world instead, so it runs on past 180 and the wrap below
+  puts it in the right column. Without exception, so a ring that goes right
+  round the world, like Antarctica's, can't be drawn.
 - **Longitude wraps.** Past 180, geometry lands in the column it wraps to, so
   data in the 0–360 convention, or running on past 180 as sources near the
   antimeridian often do, keeps every piece. The coverage fill wraps the same
   way. Latitude doesn't: geometry north or south of the world is dropped.
 - **A segment along the world's east edge belongs to the last column**, an
-  exception to "east or south". Otherwise a polygon spanning the whole world
-  would put both its sides in column 0, where it reads as self-intersecting.
+  exception to "east or south". Otherwise a polygon ending at 180, such as one
+  half of a feature split there, would leave its edge alone in column 0.
 - **A point is never at `extent`.** MapLibre skips circles and symbols at
   `x >= extent` or `y >= extent`, so a point on a tile's east or south edge
   would vanish. The cut puts it at 0 in the next tile (180 wraps to column 0);
@@ -680,10 +686,6 @@ the metadata.
 - **Visvalingam or Douglas-Peucker as the default.** §7 argues Visvalingam;
   the default is Douglas-Peucker because the CLI defaults to a distance.
 - **Shared borders** (§7): detecting shared runs is understood but not built.
-- **Segments that jump the antimeridian.** A segment from 179 to -179 is read
-  as going the long way round the world and produces a piece in every column.
-  Sources that write longitudes on past 180 are fine (§5); this form needs
-  splitting at the seam while longitude is still a float.
 - **Large flat polygons cost O(area).** A lake covers huge numbers of maxzoom
   tiles, and each is carried through every merge. The cut itself is
   O(perimeter), and PMTiles dedup makes the output nearly free, so this is CPU and

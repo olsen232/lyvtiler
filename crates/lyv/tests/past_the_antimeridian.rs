@@ -271,17 +271,6 @@ fn data_clear_of_180_has_no_adjusted_bounds() {
 }
 
 #[test]
-fn a_polygon_spanning_the_whole_world_is_built_whole() {
-    // Its sides lie on -180 and 180. Both used to land in column 0, where the
-    // polygon read as self-intersecting and was dropped.
-    let world = tiles(&collection(&[&polygon(1, -180.0, -60.0, 180.0, 60.0)]), 3);
-    let west = tiles(&collection(&[&polygon(1, -180.0, -60.0, 0.0, 60.0)]), 3);
-    let east = tiles(&collection(&[&polygon(1, 0.0, -60.0, 180.0, 60.0)]), 3);
-    assert_ne!(area_at(&world, 3), 0, "the polygon was dropped");
-    assert_eq!(area_at(&world, 3), area_at(&west, 3) + area_at(&east, 3));
-}
-
-#[test]
 fn points_on_180_are_drawable_at_every_zoom() {
     // MapLibre skips any point at x or y >= extent, so a point on a tile's
     // east edge is invisible. Points on 180 go to x = 0 of the first column,
@@ -308,4 +297,35 @@ fn points_on_180_are_drawable_at_every_zoom() {
         }
         assert_eq!(seen.len(), 40, "z{z} holds {} of the 40 points", seen.len());
     }
+}
+
+fn line(id: u64, coordinates: &str) -> String {
+    format!(
+        r#"{{"type":"Feature","id":{id},"properties":{{}},"geometry":{{"type":"LineString","coordinates":{coordinates}}}}}"#
+    )
+}
+
+#[test]
+fn a_line_written_as_180_then_minus_180_crosses_the_short_way() {
+    // Read literally, the step from 180 to -180 is a line right round the
+    // world, a piece in every column.
+    let tiles = tiles(
+        &collection(&[&line(1, "[[178,-41],[180,-41.5],[-180,-41.5],[-178,-42]]")]),
+        4,
+    );
+    let columns: std::collections::BTreeSet<u32> = features_by_column(&tiles, 4)
+        .into_iter()
+        .map(|(x, _)| x)
+        .collect();
+    assert_eq!(columns, [0, 15].into());
+}
+
+#[test]
+fn a_polygon_written_with_wrapped_longitudes_is_the_same_polygon() {
+    // 178..-178 is the box 178..182: the same area, not the rest of the world.
+    let wrapped = r#"{"type":"Feature","id":1,"properties":{},"geometry":{"type":"Polygon","coordinates":[[[178,-41],[-178,-41],[-178,-39],[178,-39],[178,-41]]]}}"#;
+    let wrapped = tiles(&collection(&[wrapped]), 4);
+    let continuous = tiles(&collection(&[&polygon(1, 178.0, -41.0, 182.0, -39.0)]), 4);
+    assert_eq!(area_at(&wrapped, 4), area_at(&continuous, 4));
+    assert_eq!(features_by_column(&wrapped, 4), vec![(0, 1), (15, 1)]);
 }
