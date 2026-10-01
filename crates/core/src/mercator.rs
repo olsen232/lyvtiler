@@ -4,12 +4,18 @@
 //! integers. Nothing is lost: the maxzoom grid is the finest the tileset can
 //! express anyway. Maxzoom 22 is a 2^34 grid, well inside an f64 mantissa.
 
+/// The latitude where Web Mercator's square world ends, north and south.
+pub const MAX_LATITUDE: f64 = 85.051_128_779_806_59;
+
 /// Project WGS84 lon/lat (degrees) onto the global grid for zoom `z`, which is
 /// `extent << z` units across, origin top-left, y down.
+///
+/// Latitude is clamped to the world, so the poles land on its edge. Unclamped,
+/// 90 gave a meaningless y: the formula's terms are both 10^16 there.
 pub fn project_global(lon: f64, lat: f64, z: u32, extent: u32) -> (i64, i64) {
     // Normalised world coordinates, 0..1, origin top-left.
     let world_x = (lon + 180.0) / 360.0;
-    let lat_rad = lat.to_radians();
+    let lat_rad = lat.clamp(-MAX_LATITUDE, MAX_LATITUDE).to_radians();
     let world_y = 0.5 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / (2.0 * std::f64::consts::PI);
 
     let world_units = f64::from(extent) * (1u64 << z) as f64;
@@ -30,9 +36,10 @@ pub const WORLD_METRES: f64 = 20_037_508.342_789_244;
 /// scale; the two agree to within the last rounded unit. Northing runs up and
 /// the grid down, hence the subtraction.
 pub fn project_global_metres(x: f64, y: f64, z: u32, extent: u32) -> (i64, i64) {
-    // Normalised world coordinates, 0..1, origin top-left.
+    // Normalised world coordinates, 0..1, origin top-left. Northing is
+    // clamped to the world, as latitude is.
     let world_x = (x + WORLD_METRES) / (2.0 * WORLD_METRES);
-    let world_y = (WORLD_METRES - y) / (2.0 * WORLD_METRES);
+    let world_y = (WORLD_METRES - y.clamp(-WORLD_METRES, WORLD_METRES)) / (2.0 * WORLD_METRES);
 
     let world_units = f64::from(extent) * (1u64 << z) as f64;
 
@@ -95,8 +102,7 @@ pub fn unproject_global(x: i64, y: i64, z: u32, extent: u32) -> (f64, f64) {
 mod tests {
     use super::*;
 
-    /// The latitude where the Web Mercator projection is truncated.
-    const MAX_LAT: f64 = 85.051_128_779_806_59;
+    const MAX_LAT: f64 = MAX_LATITUDE;
 
     #[test]
     fn the_global_grid_spans_extent_shifted_by_zoom() {
@@ -218,6 +224,21 @@ mod tests {
             (lat + MAX_LAT).abs() < 1e-9,
             "south edge came back at {lat}"
         );
+    }
+
+    #[test]
+    fn the_poles_and_beyond_land_on_the_edge_of_the_world() {
+        // At 90 the formula's terms are both 10^16 and cancel to nonsense.
+        let world = 8 * 4096;
+        for lat in [-90.0, -89.9, -91.0, -86.0] {
+            assert_eq!(project_global(10.0, lat, 3, 4096).1, world, "{lat}");
+        }
+        for lat in [90.0, 89.9, 91.0, 86.0] {
+            assert_eq!(project_global(10.0, lat, 3, 4096).1, 0, "{lat}");
+        }
+        let past = 2.0 * WORLD_METRES;
+        assert_eq!(project_global_metres(0.0, -past, 3, 4096).1, world);
+        assert_eq!(project_global_metres(0.0, past, 3, 4096).1, 0);
     }
 
     #[test]
