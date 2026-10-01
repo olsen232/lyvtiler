@@ -306,7 +306,21 @@ fn asking_for_a_column_that_cannot_be_carried_is_an_error() {
 }
 
 /// One WKB column: its name, the `geometry_types` it declares, and its rows.
-type DeclaredColumn<'a> = (&'a str, &'a [&'a str], Vec<geo_types::Geometry<f64>>);
+type DeclaredColumn<'a> = (&'a str, &'a [&'a str], Vec<Row<'a>>);
+
+/// A row as WKT, which can say `EMPTY` where `geo_types` can't, or as
+/// `geo_types`, which can hold a MultiPoint with an empty point in it (a NaN
+/// point, as WKB writes one) where the WKT parser can't.
+enum Row<'a> {
+    Wkt(&'a str),
+    Geo(geo_types::Geometry<f64>),
+}
+
+impl<'a> From<&'a str> for Row<'a> {
+    fn from(text: &'a str) -> Self {
+        Row::Wkt(text)
+    }
+}
 
 /// A Parquet file of WKB geometry columns with a hand-written `geo` key, so
 /// the declared `geometry_types` can disagree with the data, as they can in
@@ -321,11 +335,17 @@ fn declared_wkb(dir: &std::path::Path, columns: &[DeclaredColumn]) -> std::path:
     let mut arrays: Vec<ArrayRef> = Vec::new();
     let mut declared = serde_json::Map::new();
     for (name, types, rows) in columns {
-        let rows: Vec<Option<geo_types::Geometry<f64>>> = rows.iter().cloned().map(Some).collect();
-        let wkb =
-            WkbBuilder::<i32>::from_nullable_geometries(&rows, WkbType::new(Default::default()))
-                .unwrap()
-                .finish();
+        let mut builder = WkbBuilder::<i32>::new(WkbType::new(Default::default()));
+        for row in rows {
+            match row {
+                Row::Wkt(text) => {
+                    let parsed: wkt::Wkt<f64> = std::str::FromStr::from_str(text).unwrap();
+                    builder.push_geometry(Some(&parsed)).unwrap();
+                }
+                Row::Geo(geometry) => builder.push_geometry(Some(geometry)).unwrap(),
+            }
+        }
+        let wkb = builder.finish();
         fields.push(Field::new(*name, DataType::Binary, true));
         arrays.push(wkb.to_array_ref());
         declared.insert(
@@ -350,11 +370,6 @@ fn declared_wkb(dir: &std::path::Path, columns: &[DeclaredColumn]) -> std::path:
     path
 }
 
-fn wkt(text: &str) -> geo_types::Geometry<f64> {
-    use std::str::FromStr;
-    wkt::Wkt::<f64>::from_str(text).unwrap().try_into().unwrap()
-}
-
 #[test]
 fn a_column_declared_polygon_may_hold_multipolygons() {
     // The staging failure: a single-type reader stopped at the first row that
@@ -366,10 +381,8 @@ fn a_column_declared_polygon_may_hold_multipolygons() {
             "geometry",
             &["Polygon"],
             vec![
-                wkt("POLYGON((174 -41, 175 -41, 175 -40, 174 -41))"),
-                wkt(
-                    "MULTIPOLYGON(((174 -41, 175 -41, 175 -40, 174 -41)),((176 -41, 177 -41, 177 -40, 176 -41)))",
-                ),
+                "POLYGON((174 -41, 175 -41, 175 -40, 174 -41))".into(),
+                "MULTIPOLYGON(((174 -41, 175 -41, 175 -40, 174 -41)),((176 -41, 177 -41, 177 -40, 176 -41)))".into(),
             ],
         )],
     );
@@ -388,10 +401,10 @@ fn a_column_may_mix_points_lines_and_polygons_whatever_it_declares() {
             "geometry",
             &["Point"],
             vec![
-                wkt("POINT(174.5 -41)"),
-                wkt("LINESTRING(174 -41, 175 -40)"),
-                wkt("POLYGON((174 -41, 175 -41, 175 -40, 174 -41))"),
-                wkt("MULTIPOINT((174 -41), (175 -40))"),
+                "POINT(174.5 -41)".into(),
+                "LINESTRING(174 -41, 175 -40)".into(),
+                "POLYGON((174 -41, 175 -41, 175 -40, 174 -41))".into(),
+                "MULTIPOINT((174 -41), (175 -40))".into(),
             ],
         )],
     );
@@ -416,9 +429,9 @@ fn an_unread_geometry_column_that_misdeclares_itself_is_left_alone() {
             (
                 "geometry",
                 &["Polygon"],
-                vec![wkt("MULTIPOLYGON(((174 -41, 175 -41, 175 -40, 174 -41)))")],
+                vec!["MULTIPOLYGON(((174 -41, 175 -41, 175 -40, 174 -41)))".into()],
             ),
-            ("labels", &["Point"], vec![wkt("POINT(174.5 -40.8)")]),
+            ("labels", &["Point"], vec!["POINT(174.5 -40.8)".into()]),
         ],
     );
     let features = read_field(&path, Some("labels")).unwrap();
@@ -427,5 +440,58 @@ fn an_unread_geometry_column_that_misdeclares_itself_is_left_alone() {
     assert!(
         features[0].properties.is_empty(),
         "the other column isn't an attribute"
+    );
+}
+
+#[test]
+fn an_empty_geometry_is_dropped_as_having_none() {
+    // `geo_types` has no empty point, and the conversion to it panicked. An
+    // empty point in a MultiPoint goes; a feature with only empties goes too.
+    let dir = tempfile::tempdir().unwrap();
+    let path = declared_wkb(
+        dir.path(),
+        &[(
+            "geometry",
+            &[],
+            vec![
+                "POINT (174.5 -41)".into(),
+                "POINT EMPTY".into(),
+                Row::Geo(geo_types::Geometry::MultiPoint(
+                    vec![
+                        geo_types::Point::new(174.6, -41.0),
+                        geo_types::Point::new(f64::NAN, f64::NAN),
+                    ]
+                    .into(),
+                )),
+                Row::Geo(geo_types::Geometry::MultiPoint(
+                    vec![geo_types::Point::new(f64::NAN, f64::NAN)].into(),
+                )),
+                "LINESTRING EMPTY".into(),
+                "POLYGON EMPTY".into(),
+                "GEOMETRYCOLLECTION (POINT EMPTY)".into(),
+                "GEOMETRYCOLLECTION EMPTY".into(),
+            ],
+        )],
+    );
+    let mut features = Vec::new();
+    let skipped = read(
+        &path,
+        Z,
+        EXTENT,
+        &Selection::default(),
+        &mut |_| {},
+        &mut |feature| {
+            features.push(feature);
+            Ok(())
+        },
+    )
+    .unwrap();
+    // The point, and the MultiPoint without its empty point.
+    assert_eq!(features.len(), 2);
+    assert_eq!(features[1].parts.len(), 1);
+    assert_eq!(skipped.no_geometry, 6, "{skipped:?}");
+    assert_eq!(
+        skipped.collapsed, 0,
+        "an empty polygon is no geometry, not a small one"
     );
 }

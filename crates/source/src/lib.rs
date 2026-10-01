@@ -334,10 +334,59 @@ fn geometry_parts(
 ) -> Result<Projected> {
     use geozero::ToGeo;
 
+    let Some(geometry) = without_empty_positions(geometry) else {
+        return Ok(Projected {
+            kind: None,
+            parts: Vec::new(),
+            dropped_members: false,
+        });
+    };
     let decoded = geozero::geojson::GeoJson(&geometry.to_string())
         .to_geo()
         .context("reading the geometry")?;
     Ok(parts_of(decoded, crs, maxzoom, extent))
+}
+
+/// A GeoJSON geometry without its empty parts, as [`without_empties`] does
+/// for GeoArrow: an empty position in a MultiPoint, or an empty member of a
+/// collection, is left out. `None` when nothing is left. Empty positions can't
+/// be decoded at all, and stopped the read.
+fn without_empty_positions(geometry: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+
+    let empty = |value: &Value| value.as_array().is_some_and(Vec::is_empty);
+    let mut geometry = geometry.clone();
+    match geometry.get("type").and_then(Value::as_str) {
+        Some("GeometryCollection") => {
+            let members: Vec<Value> = geometry
+                .get("geometries")
+                .and_then(Value::as_array)
+                .map(|members| members.iter().filter_map(without_empty_positions).collect())
+                .unwrap_or_default();
+            if members.is_empty() {
+                return None;
+            }
+            geometry["geometries"] = Value::Array(members);
+        }
+        Some("MultiPoint") => {
+            let points: Vec<Value> = geometry
+                .get("coordinates")
+                .and_then(Value::as_array)
+                .map(|points| points.iter().filter(|p| !empty(p)).cloned().collect())
+                .unwrap_or_default();
+            if points.is_empty() {
+                return None;
+            }
+            geometry["coordinates"] = Value::Array(points);
+        }
+        // The rest: empty coordinates are an empty geometry.
+        _ => {
+            if geometry.get("coordinates").is_some_and(empty) {
+                return None;
+            }
+        }
+    }
+    Some(geometry)
 }
 
 /// A geometry projected onto the global grid.
@@ -995,13 +1044,13 @@ fn geoarrow_geometries(
     fn collect<'a>(
         array: &'a impl GeoArrowArrayAccessor<'a>,
     ) -> geoarrow_schema::error::GeoArrowResult<Vec<Option<geo_types::Geometry<f64>>>> {
-        use geo_traits::to_geo::ToGeoGeometry;
-        // `None` for a null, `Err` for an undecodable row.
+        // `None` for a null, and for a geometry with nothing but empties in
+        // it. `Err` for an undecodable row.
         array
             .iter()
             .map(|item| match item {
                 None => Ok(None),
-                Some(geom) => geom.map(|geom| Some(geom.to_geometry())),
+                Some(geom) => geom.map(|geom| without_empties(&geom)),
             })
             .collect()
     }
@@ -1010,6 +1059,46 @@ fn geoarrow_geometries(
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let array = array.as_ref();
     downcast_geoarrow_array!(array, collect).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// A geometry as `geo_types`, without its empty parts: an empty point in a
+/// MultiPoint, or an empty member of a collection, is left out. `None` when
+/// nothing is left, so the feature counts as having no geometry. (`geo_types`
+/// can't hold an empty point at all, and converting one panics.)
+fn without_empties<G: geo_traits::GeometryTrait<T = f64>>(
+    geometry: &G,
+) -> Option<geo_types::Geometry<f64>> {
+    use geo_traits::to_geo::{ToGeoGeometry, ToGeoPoint};
+    use geo_traits::{
+        GeometryCollectionTrait, GeometryType, LineStringTrait, MultiLineStringTrait,
+        MultiPointTrait, MultiPolygonTrait, PolygonTrait,
+    };
+    use geo_types::Geometry;
+
+    match geometry.as_type() {
+        GeometryType::Point(point) => point.try_to_point().map(Geometry::Point),
+        GeometryType::MultiPoint(points) => {
+            let kept: Vec<geo_types::Point<f64>> =
+                points.points().filter_map(|p| p.try_to_point()).collect();
+            (!kept.is_empty()).then(|| Geometry::MultiPoint(kept.into()))
+        }
+        GeometryType::LineString(line) if line.num_coords() == 0 => None,
+        GeometryType::MultiLineString(lines) if lines.num_line_strings() == 0 => None,
+        GeometryType::Polygon(polygon)
+            if polygon.exterior().is_none_or(|ring| ring.num_coords() == 0) =>
+        {
+            None
+        }
+        GeometryType::MultiPolygon(polygons) if polygons.num_polygons() == 0 => None,
+        GeometryType::GeometryCollection(collection) => {
+            let kept: Vec<Geometry<f64>> = collection
+                .geometries()
+                .filter_map(|member| without_empties(&member))
+                .collect();
+            (!kept.is_empty()).then(|| Geometry::GeometryCollection(kept.into()))
+        }
+        _ => geometry.try_to_geometry(),
+    }
 }
 
 /// Every non-geometry column, as a list of values per column. Types MVT can't
@@ -1472,6 +1561,32 @@ mod tests {
         assert_eq!(features[0].kind, Kind::Points);
         assert_eq!(features[0].parts.len(), 2);
         assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    #[test]
+    fn empty_geojson_geometry_is_dropped_not_fatal() {
+        // An empty position couldn't be decoded, and stopped the run.
+        let feature = |geometry: &str| {
+            format!(r#"{{"type":"Feature","properties":{{}},"geometry":{geometry}}}"#)
+        };
+        let json = format!(
+            r#"{{"type":"FeatureCollection","features":[{}]}}"#,
+            [
+                feature(r#"{"type":"Point","coordinates":[]}"#),
+                feature(r#"{"type":"MultiPoint","coordinates":[[174.6,-41],[]]}"#),
+                feature(r#"{"type":"Polygon","coordinates":[]}"#),
+                feature(
+                    r#"{"type":"GeometryCollection","geometries":[
+                    {"type":"Point","coordinates":[]}]}"#
+                ),
+            ]
+            .join(",")
+        );
+        let (features, skipped) = read_counting(&json).unwrap();
+        assert_eq!(features.len(), 1, "the MultiPoint, without its empty point");
+        assert_eq!(features[0].parts.len(), 1);
+        assert_eq!(skipped.no_geometry, 3, "{skipped:?}");
+        assert_eq!(skipped.collapsed, 0, "an empty polygon is no geometry");
     }
 
     #[test]
