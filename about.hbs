@@ -20,6 +20,32 @@ Two things are **not** in this list and are worth stating:
 - {{{name}}} — {{count}} crate{{#if (ne count 1)}}s{{/if}}
 {{/each}}
 
+## Apache NOTICE
+
+Apache-2.0 section 4(d) requires a redistribution to carry the NOTICE file of any
+dependency that has one. cargo-about does not collect NOTICE files, so this one is
+copied by hand from the arrow-rs crates (`arrow-*` and `parquet`, which all ship the
+same file). Check it when dependencies change; this lists every NOTICE file in the graph:
+
+    cargo metadata --format-version 1 | jq -r '.packages[].manifest_path' \
+      | xargs -n1 dirname | xargs -I{} find {} -maxdepth 1 -iname 'notice*'
+
+```
+Apache Arrow
+Copyright 2016-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+This product includes software from the chronoutil crate (MIT)
+ * Copyright (c) 2020-2022 Oliver Margetts
+ * https://github.com/olliemath/chronoutil
+
+This product includes software from the compact-thrift project (Apache 2.0)
+ * Copyright Jörn Horstmann
+ * https://github.com/jhorstmann/compact-thrift
+```
+
 The sections below are one per distinct license *text*, not per license: the MIT and
 BSD texts carry their own copyright lines, so a license used by two hundred crates
 appears once for each wording. Search for a crate name to find its terms.
