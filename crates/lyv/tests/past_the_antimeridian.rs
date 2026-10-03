@@ -24,6 +24,7 @@ fn options(dir: &tempfile::TempDir, source: &str, max_zoom: u32) -> Options {
         attributes: lyv::Attributes::All,
         geometry_field: None,
         input_crs: None,
+        regular_angles_check: true,
         extent: EXTENT,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

@@ -135,6 +135,132 @@ pub struct SourceFeature {
     pub properties: Vec<(String, Value)>,
 }
 
+/// What a read found, beyond the features themselves.
+#[derive(Debug, Default)]
+pub struct Read {
+    pub skipped: Skipped,
+    pub structure: Structure,
+}
+
+/// The regular angles, as fractions of a full turn: the eighths and sixths
+/// that grids, buildings and hexagons are made of. A layer built of them has
+/// structure that a too-coarse maxzoom bends.
+pub const REGULAR_ANGLES: [f64; 5] = [1.0 / 8.0, 2.0 / 8.0, 3.0 / 8.0, 1.0 / 6.0, 2.0 / 6.0];
+
+/// How near a regular angle a turn must be to count as one, as a fraction of a
+/// full turn. A turn smaller than this is no turn at all.
+pub const REGULAR_SLACK: f64 = 1.0 / 400.0;
+
+/// The cosine and sine of each regular angle, and the cosine of the slack:
+/// worked out once, since the test runs on every vertex.
+struct Regular {
+    angles: [(f64, f64); REGULAR_ANGLES.len()],
+    cos_slack: f64,
+}
+
+static REGULAR: std::sync::LazyLock<Regular> = std::sync::LazyLock::new(|| Regular {
+    angles: REGULAR_ANGLES.map(|turn| {
+        let radians = turn * std::f64::consts::TAU;
+        (radians.cos(), radians.sin())
+    }),
+    cos_slack: (REGULAR_SLACK * std::f64::consts::TAU).cos(),
+});
+
+/// How much of a layer turns at regular angles, measured on the coordinates
+/// as given, before any grid. With a sample of the parts that do, to try a
+/// maxzoom on.
+#[derive(Debug, Default)]
+pub struct Structure {
+    /// Turns of at least [`REGULAR_SLACK`], at every vertex of every line and
+    /// ring.
+    pub turns: u64,
+    /// Of those, the ones at a regular angle.
+    pub regular: u64,
+    /// Parts with a regular turn, in world fractions (see
+    /// `mercator::project_unit`), up to [`SAMPLE`] vertices in all.
+    pub sample: Vec<Outline>,
+    sampled: usize,
+    /// Scratch for one part's world fractions, reused.
+    units: Vec<(f64, f64)>,
+    /// Whether to measure at all (see [`Selection::regular_angles`]).
+    measuring: bool,
+}
+
+/// One sampled line or ring, in world fractions.
+#[derive(Debug, Clone)]
+pub struct Outline {
+    pub points: Vec<(f64, f64)>,
+    /// A ring, whose first vertex is a turn too.
+    pub closed: bool,
+}
+
+/// How many vertices of parts with regular turns to keep, to try a maxzoom
+/// on.
+pub const SAMPLE: usize = 200_000;
+
+impl Structure {
+    /// Count one part's turns, and sample it if any is regular.
+    fn measure(&mut self, points: &[(f64, f64)]) {
+        let n = points.len();
+        if n < 3 || !self.measuring {
+            return;
+        }
+        let closed = n >= 4 && points[0] == points[n - 1];
+        let (mut turns, mut regular) = (0u64, 0u64);
+        let mut count = |a, b, c| {
+            if let Some(is_regular) = turn(a, b, c) {
+                turns += 1;
+                regular += u64::from(is_regular);
+            }
+        };
+        for i in 1..n - 1 {
+            count(points[i - 1], points[i], points[i + 1]);
+        }
+        if closed {
+            count(points[n - 2], points[0], points[1]);
+        }
+        self.turns += turns;
+        self.regular += regular;
+        // A part across the antimeridian would be measured the long way.
+        let jumps = points.windows(2).any(|w| (w[1].0 - w[0].0).abs() > 0.5);
+        if regular > 0 && self.sampled + n <= SAMPLE && !jumps {
+            self.sampled += n;
+            self.sample.push(Outline {
+                points: points.to_vec(),
+                closed,
+            });
+        }
+    }
+}
+
+/// The turn at `b`, going from `a` to `c`: `None` if it's under
+/// [`REGULAR_SLACK`] (or an edge has no length), else whether it's a regular
+/// angle, within the slack either way. Products and a square root, no
+/// trigonometry: this runs on every vertex of the source.
+pub fn turn(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> Option<bool> {
+    let (ux, uy) = (b.0 - a.0, b.1 - a.1);
+    let (vx, vy) = (c.0 - b.0, c.1 - b.1);
+    let lengths = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
+    if lengths == 0.0 {
+        return None;
+    }
+    // The cosine and sine of the turn, either way round.
+    let cos = (ux * vx + uy * vy) / lengths;
+    let sin = ((ux * vy - uy * vx) / lengths).abs();
+    let regular = &*REGULAR;
+    if cos >= regular.cos_slack {
+        return None;
+    }
+    // cos(turn - angle), by the angle-difference formula: within the slack
+    // when at least its cosine.
+    Some(
+        regular
+            .angles
+            .iter()
+            .any(|&(angle_cos, angle_sin)| cos * angle_cos + sin * angle_sin >= regular.cos_slack),
+    )
+}
+
 /// What to read from a source. Narrows the read, so unwanted attributes are
 /// never parsed or carried.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -149,6 +275,10 @@ pub struct Selection {
     /// Mercator but whose declared CRS is missing, wrong, or one lyv can't
     /// read. `None` goes by the file.
     pub input_crs: Option<Crs>,
+    /// Measure how much of the layer turns at regular angles (see
+    /// [`Structure`]). Off by default: it's work on every vertex, and only
+    /// choosing a maxzoom needs it.
+    pub regular_angles: bool,
 }
 
 /// Which attributes to carry. A name listed that no feature has is an error,
@@ -263,10 +393,14 @@ pub fn read_geojson(
     selection: &Selection,
     expect: &mut dyn FnMut(u64),
     visit: &mut dyn FnMut(SourceFeature) -> Result<()>,
-) -> Result<Skipped> {
+) -> Result<Read> {
     only_one_geometry(selection, path)?;
     let wanted = Wanted::new(selection);
     let mut skipped = Skipped::default();
+    let mut structure = Structure {
+        measuring: selection.regular_angles,
+        ..Structure::default()
+    };
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let document: serde_json::Value = serde_json::from_str(&text)
@@ -306,7 +440,7 @@ pub fn read_geojson(
             continue;
         };
 
-        let projected = geometry_parts(geometry, crs, maxzoom, extent)
+        let projected = geometry_parts(geometry, crs, maxzoom, extent, &mut structure)
             .with_context(|| format!("in feature {sequence} of {}", path.display()))?;
         let Some((kind, parts)) = skipped.keep(projected) else {
             continue;
@@ -322,7 +456,7 @@ pub fn read_geojson(
         })?;
     }
     wanted.check(path)?;
-    Ok(skipped)
+    Ok(Read { skipped, structure })
 }
 
 /// Project a GeoJSON geometry into runs of global coordinates, via `geozero`.
@@ -331,6 +465,7 @@ fn geometry_parts(
     crs: Crs,
     maxzoom: u32,
     extent: u32,
+    structure: &mut Structure,
 ) -> Result<Projected> {
     use geozero::ToGeo;
 
@@ -344,7 +479,7 @@ fn geometry_parts(
     let decoded = geozero::geojson::GeoJson(&geometry.to_string())
         .to_geo()
         .context("reading the geometry")?;
-    Ok(parts_of(decoded, crs, maxzoom, extent))
+    Ok(parts_of(decoded, crs, maxzoom, extent, structure))
 }
 
 /// A GeoJSON geometry without its empty parts, as [`without_empties`] does
@@ -407,19 +542,34 @@ struct Projected {
 /// GeometryCollection keeps only its members of the highest dimension
 /// (polygons, then lines, then points), nested collections included, since a
 /// feature has one kind; the loss is counted.
-fn parts_of(decoded: geo_types::Geometry<f64>, crs: Crs, maxzoom: u32, extent: u32) -> Projected {
+fn parts_of(
+    decoded: geo_types::Geometry<f64>,
+    crs: Crs,
+    maxzoom: u32,
+    extent: u32,
+    structure: &mut Structure,
+) -> Projected {
     use geo_types::Geometry;
 
     let world = i64::from(extent) << maxzoom;
+    // A cell: the projection is shared, by reference, with `rings_of`.
+    let structure = std::cell::RefCell::new(structure);
     let project = |line: &geo_types::LineString<f64>| -> Vec<Coord<i64>> {
-        let mut points: Vec<Coord<i64>> = line
-            .0
+        let mut structure = structure.borrow_mut();
+        // Projected once: the fraction for measuring turns, rounded for the
+        // grid.
+        let mut units = std::mem::take(&mut structure.units);
+        units.clear();
+        units.extend(line.0.iter().map(|c| crs.project_unit(c.x, c.y)));
+        let mut points: Vec<Coord<i64>> = units
             .iter()
-            .map(|c| {
-                let (x, y) = crs.project_global(c.x, c.y, maxzoom, extent);
+            .map(|&unit| {
+                let (x, y) = lyv_core::mercator::onto_grid(unit, maxzoom, extent);
                 Coord { x, y }
             })
             .collect();
+        structure.measure(&units);
+        structure.units = units;
         short_way(&mut points, world);
         points
     };
@@ -467,7 +617,7 @@ fn parts_of(decoded: geo_types::Geometry<f64>, crs: Crs, maxzoom: u32, extent: u
             let members: Vec<Projected> = collection
                 .0
                 .into_iter()
-                .map(|member| parts_of(member, crs, maxzoom, extent))
+                .map(|member| parts_of(member, crs, maxzoom, extent, &mut structure.borrow_mut()))
                 .collect();
             let rank = |kind: Kind| match kind {
                 Kind::Points => 0,
@@ -736,13 +886,17 @@ pub fn read_flatgeobuf(
     selection: &Selection,
     expect: &mut dyn FnMut(u64),
     visit: &mut dyn FnMut(SourceFeature) -> Result<()>,
-) -> Result<Skipped> {
+) -> Result<Read> {
     use flatgeobuf::{FallibleStreamingIterator, FgbReader};
     use geozero::{FeatureProperties, ToGeo};
 
     only_one_geometry(selection, path)?;
     let wanted = Wanted::new(selection);
     let mut skipped = Skipped::default();
+    let mut structure = Structure {
+        measuring: selection.regular_angles,
+        ..Structure::default()
+    };
 
     let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut reader = std::io::BufReader::new(file);
@@ -780,7 +934,9 @@ pub fn read_flatgeobuf(
             .to_geo()
             .with_context(|| format!("in feature {sequence} of {}", path.display()))?;
 
-        let Some((kind, parts)) = skipped.keep(parts_of(geometry, crs, maxzoom, extent)) else {
+        let Some((kind, parts)) =
+            skipped.keep(parts_of(geometry, crs, maxzoom, extent, &mut structure))
+        else {
             sequence += 1;
             continue;
         };
@@ -804,7 +960,7 @@ pub fn read_flatgeobuf(
         sequence += 1;
     }
     wanted.check(path)?;
-    Ok(skipped)
+    Ok(Read { skipped, structure })
 }
 
 /// Collects a feature's attributes as they're walked. Filtered here, so an
@@ -881,12 +1037,16 @@ pub fn read_geoparquet(
     selection: &Selection,
     expect: &mut dyn FnMut(u64),
     visit: &mut dyn FnMut(SourceFeature) -> Result<()>,
-) -> Result<Skipped> {
+) -> Result<Read> {
     let wanted = Wanted::new(selection);
     use geoparquet::reader::{GeoParquetReaderBuilder, GeoParquetRecordBatchReader};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let mut skipped = Skipped::default();
+    let mut structure = Structure {
+        measuring: selection.regular_angles,
+        ..Structure::default()
+    };
     let file = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("{} is not a Parquet file", path.display()))?;
@@ -958,7 +1118,9 @@ pub fn read_geoparquet(
                 sequence += 1;
                 continue;
             };
-            let Some((kind, parts)) = skipped.keep(parts_of(geometry, crs, maxzoom, extent)) else {
+            let Some((kind, parts)) =
+                skipped.keep(parts_of(geometry, crs, maxzoom, extent, &mut structure))
+            else {
                 sequence += 1;
                 continue;
             };
@@ -980,7 +1142,7 @@ pub fn read_geoparquet(
         }
     }
     wanted.check(path)?;
-    Ok(skipped)
+    Ok(Read { skipped, structure })
 }
 
 /// The schema to read a GeoParquet file into: `geometry_column` tagged as
@@ -1196,7 +1358,7 @@ pub fn read(
     selection: &Selection,
     expect: &mut dyn FnMut(u64),
     visit: &mut dyn FnMut(SourceFeature) -> Result<()>,
-) -> Result<Skipped> {
+) -> Result<Read> {
     let ends_with = |want: &str| {
         path.extension()
             .is_some_and(|e| e.eq_ignore_ascii_case(want))
@@ -1280,7 +1442,7 @@ mod tests {
                 Ok(())
             },
         )?;
-        Ok((out, skipped))
+        Ok((out, skipped.skipped))
     }
 
     fn read_selecting(json: &str, selection: &Selection) -> Result<Vec<SourceFeature>> {
@@ -1528,6 +1690,69 @@ mod tests {
         let seam = read_line("[[179.9,-41],[180,-41.1],[-180,-41.1],[-179.9,-41.2]]");
         assert_eq!(seam[1], seam[2], "the seam's two sides are one point");
         assert_eq!(seam[3], project(180.1, -41.2));
+    }
+
+    #[test]
+    fn a_turn_is_regular_within_a_400th_of_an_eighth_or_a_sixth() {
+        // A turn given as a fraction of a full turn, either way round.
+        let at = |turn_of: f64| {
+            let r = turn_of * std::f64::consts::TAU;
+            turn((-1.0, 0.0), (0.0, 0.0), (r.cos(), r.sin()))
+        };
+        let nudge = 0.8 * REGULAR_SLACK;
+        for &angle in &REGULAR_ANGLES {
+            for turned in [angle, -angle, angle + nudge, angle - nudge] {
+                assert_eq!(at(turned), Some(true), "{turned}");
+            }
+            assert_eq!(
+                at(angle + 2.0 * REGULAR_SLACK),
+                Some(false),
+                "{angle} and a bit"
+            );
+        }
+        // A twelfth, five twelfths, a tenth: not regular.
+        for turned in [1.0 / 12.0, 5.0 / 12.0, 0.1, -0.45] {
+            assert_eq!(at(turned), Some(false), "{turned}");
+        }
+        // Under the slack isn't a turn; nor is an edge with no length.
+        assert_eq!(at(0.5 * REGULAR_SLACK), None);
+        assert_eq!(at(0.0), None);
+        assert_eq!(turn((0.0, 0.0), (0.0, 0.0), (1.0, 0.0)), None);
+    }
+
+    #[test]
+    fn a_ring_s_corners_are_counted_and_it_is_sampled() {
+        let mut structure = Structure {
+            measuring: true,
+            ..Structure::default()
+        };
+        // A thousandth of the world: a whole world wide would read as crossing
+        // the antimeridian, which isn't sampled.
+        let side = 0.001;
+        let square = [
+            (0.0, 0.0),
+            (side, 0.0),
+            (side, side),
+            (0.0, side),
+            (0.0, 0.0),
+        ];
+        structure.measure(&square);
+        assert_eq!(
+            (structure.turns, structure.regular),
+            (4, 4),
+            "the closing corner too"
+        );
+        assert_eq!(structure.sample.len(), 1);
+        assert!(structure.sample[0].closed);
+
+        // No structure, no sample.
+        let mut structure = Structure {
+            measuring: true,
+            ..Structure::default()
+        };
+        structure.measure(&[(0.0, 0.0), (0.001, 0.0), (0.002, 0.0006)]);
+        assert_eq!((structure.turns, structure.regular), (1, 0));
+        assert!(structure.sample.is_empty());
     }
 
     #[test]

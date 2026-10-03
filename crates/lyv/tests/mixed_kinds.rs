@@ -48,6 +48,7 @@ fn each_feature_keeps_its_own_kind_at_every_zoom() {
         attributes: lyv::Attributes::All,
         geometry_field: None,
         input_crs: None,
+        regular_angles_check: true,
         extent: 4096,
         maxzoom_extent: Some(8192),
         ranker: "evenstar".to_string(),

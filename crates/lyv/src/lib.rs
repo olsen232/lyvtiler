@@ -48,6 +48,9 @@ pub struct Options {
     /// What the input's coordinates are, overriding the CRS it declares.
     /// Nothing is reprojected. `None` goes by the file.
     pub input_crs: Option<lyv_source::Crs>,
+    /// When choosing the maxzoom, go deep enough to keep a layer's regular
+    /// angles (see `structure_floor`).
+    pub regular_angles_check: bool,
     pub extent: u32,
     /// Tile resolution at maxzoom, if finer than `extent`. Maxzoom's detail
     /// can't be recovered later, so it's worth spending resolution on. Must be
@@ -287,6 +290,28 @@ pub fn ingest(
         }
 
         // A given maxzoom is not a candidate; there is nothing to decide.
+        if options.max_zoom.is_none()
+            && first
+            && let Some(floor) = structure_floor(
+                &pass.structure,
+                z,
+                cap,
+                grid_zoom,
+                detail,
+                options.simplification,
+            )
+        {
+            progress.say(&format!(
+                "  {:.0}% of turns are regular angles (eighths and sixths of a turn), and z{z} \
+                 would keep {:.0}% of them: maxzoom raised to z{} (keeps {:.0}%)",
+                100.0 * floor.share,
+                100.0 * floor.kept_before,
+                floor.zoom,
+                100.0 * floor.kept,
+            ));
+            z = floor.zoom;
+            continue;
+        }
         if options.max_zoom.is_some() {
             break (
                 z,
@@ -495,6 +520,175 @@ impl Extent {
     }
 }
 
+/// Below this share of turns at regular angles (see
+/// [`lyv_source::REGULAR_ANGLES`]), a layer has no structure to keep. Random
+/// angles give 5.0%; floodplains, 2.4% of eighths alone; parcels, 41%; building
+/// outlines, 91%.
+const REGULAR_SHARE: f64 = 0.25;
+
+/// The share of regular corners a maxzoom must keep, within [`KEPT_SLACK`]
+/// of their angle, for the structure to survive.
+const KEPT_SHARE: f64 = 0.90;
+
+/// How far a corner may bend and still be kept, as a fraction of a full turn.
+const KEPT_SLACK: f64 = 1.0 / 100.0;
+
+/// Where a layer's structure says the maxzoom should be.
+struct StructureFloor {
+    /// The share of turns at regular angles.
+    share: f64,
+    /// The share of those the maxzoom first tried keeps.
+    kept_before: f64,
+    zoom: u32,
+    /// The share `zoom` keeps.
+    kept: f64,
+}
+
+/// The shallowest maxzoom deeper than `from`, and no deeper than `cap`, that
+/// keeps a layer's regular angles; `None` if it has too few to matter, or
+/// `from` keeps them already.
+///
+/// Snapping to a grid bends a corner whose edges are short against a unit:
+/// at z12 (about a metre), buildings keep 48% of their right angles, and 1 m
+/// flow paths 8% of their eighths. Each candidate is tried on the read's
+/// sample: rounded onto its grid and simplified, as the cut does.
+fn structure_floor(
+    structure: &lyv_source::Structure,
+    from: u32,
+    cap: u32,
+    grid_zoom: u32,
+    detail: u32,
+    tolerance: lyv_simplify::Tolerance,
+) -> Option<StructureFloor> {
+    if structure.turns == 0 {
+        return None;
+    }
+    let share = structure.regular as f64 / structure.turns as f64;
+    if share < REGULAR_SHARE {
+        return None;
+    }
+    let kept_before = kept_at(structure, from, grid_zoom, detail, tolerance);
+    if kept_before >= KEPT_SHARE {
+        return None;
+    }
+    let mut zoom = from;
+    let mut kept = kept_before;
+    while kept < KEPT_SHARE && zoom < cap {
+        zoom += 1;
+        kept = kept_at(structure, zoom, grid_zoom, detail, tolerance);
+    }
+    (zoom > from).then_some(StructureFloor {
+        share,
+        kept_before,
+        zoom,
+        kept,
+    })
+}
+
+/// The share of the sample's regular corners a maxzoom keeps within
+/// [`KEPT_SLACK`], rounded as the pipeline rounds (onto the grid the
+/// source is read onto, then down to the maxzoom's) and simplified.
+fn kept_at(
+    structure: &lyv_source::Structure,
+    zoom: u32,
+    grid_zoom: u32,
+    detail: u32,
+    tolerance: lyv_simplify::Tolerance,
+) -> f64 {
+    use geo_types::Coord;
+
+    // A turn as a fraction of a full turn, signed.
+    let turn_of = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| {
+        let (ux, uy) = (b.0 - a.0, b.1 - a.1);
+        let (vx, vy) = (c.0 - b.0, c.1 - b.1);
+        (ux * vy - uy * vx).atan2(ux * vx + uy * vy) / std::f64::consts::TAU
+    };
+    let float = |p: Coord<i64>| (p.x as f64, p.y as f64);
+
+    let (mut corners, mut kept) = (0u64, 0u64);
+    for outline in &structure.sample {
+        let points = &outline.points;
+        let n = points.len();
+        let gridded: Vec<Coord<i64>> = points
+            .iter()
+            .map(|&p| {
+                let (x, y) = lyv_core::mercator::onto_grid(p, grid_zoom, detail);
+                let read = Coord { x, y };
+                if grid_zoom > zoom {
+                    scale_down(read, grid_zoom - zoom)
+                } else {
+                    read
+                }
+            })
+            .collect();
+        let simplified = lyv_simplify::simplify_part(&gridded, tolerance, outline.closed);
+
+        // Simplifying keeps a subsequence, so each survivor is found in order.
+        let mut survivor = vec![None; n];
+        let mut j = 0;
+        for (k, point) in simplified.iter().enumerate() {
+            while j < n && gridded[j] != *point {
+                j += 1;
+            }
+            if j < n {
+                survivor[j] = Some(k);
+                j += 1;
+            }
+        }
+        let m = simplified.len();
+        // The vertices before and after `k` in the simplified part, round the
+        // ring's closing point.
+        let neighbours = |k: usize| -> Option<(usize, usize)> {
+            if outline.closed {
+                let last = m.checked_sub(1)?;
+                let before = if k == 0 { last.checked_sub(1)? } else { k - 1 };
+                let after = if k + 1 >= last { (k + 1) % last } else { k + 1 };
+                Some((before, after))
+            } else {
+                (k > 0 && k + 1 < m).then_some((k - 1, k + 1))
+            }
+        };
+
+        let corner = |i: usize| -> Option<(usize, usize)> {
+            if outline.closed && i == n - 1 {
+                return None; // the closing point: vertex 0 again
+            }
+            if outline.closed && i == 0 {
+                Some((n - 2, 1))
+            } else {
+                (i > 0 && i + 1 < n).then_some((i - 1, i + 1))
+            }
+        };
+        for i in 0..n {
+            let Some((before, after)) = corner(i) else {
+                continue;
+            };
+            if lyv_source::turn(points[before], points[i], points[after]) != Some(true) {
+                continue;
+            }
+            corners += 1;
+            let truth = turn_of(points[before], points[i], points[after]);
+            let Some((b, a)) = survivor[i].and_then(neighbours) else {
+                continue;
+            };
+            let k = survivor[i].expect("a survivor");
+            let now = turn_of(
+                float(simplified[b]),
+                float(simplified[k]),
+                float(simplified[a]),
+            );
+            if (now - truth).abs() <= KEPT_SLACK {
+                kept += 1;
+            }
+        }
+    }
+    if corners == 0 {
+        1.0
+    } else {
+        kept as f64 / corners as f64
+    }
+}
+
 /// The zoom a pass is testing, and the grid everything is measured on.
 #[derive(Clone, Copy)]
 struct Candidate {
@@ -507,10 +701,10 @@ struct Candidate {
     detail: u32,
 }
 
-/// What the reader and cutter hand back: the reader's skip counts, then what
+/// What the reader and cutter hand back: what the reader found, then what
 /// the cutter accumulated.
 type Cut = (
-    lyv_source::Skipped,
+    lyv_source::Read,
     Pieces,
     lyv_rank::Layer,
     Vec<(TileCoord, u64)>,
@@ -525,6 +719,8 @@ struct Pass {
     /// filled after closing, to keep each tile's chain order.
     covered: Vec<(TileCoord, u64)>,
     skipped: lyv_source::Skipped,
+    /// How much of the source turns at regular angles, and a sample of it.
+    structure: lyv_source::Structure,
     /// What the cut already simplified at, so maxzoom doesn't do it again.
     simplified: lyv_simplify::Simplified,
     /// Features dropped because their pieces wouldn't close back to their own
@@ -576,7 +772,7 @@ fn stream_pass(
     // inside `lyv_source`, which can't be timed from here otherwise.
     let mut handed_back: Option<std::time::Instant> = None;
 
-    let (skipped, mut pieces, mut layer, mut covered, tangled) =
+    let (read, mut pieces, mut layer, mut covered, tangled) =
         std::thread::scope(|scope| -> Result<Cut> {
             let cutting = scope.spawn(move || {
                 let mut pieces = Pieces::new();
@@ -606,7 +802,7 @@ fn stream_pass(
                 (pieces, layer, covered, tangled)
             });
 
-            let skipped = lyv_source::read(
+            let read = lyv_source::read(
                 &options.input,
                 at.grid_zoom,
                 at.detail,
@@ -614,6 +810,10 @@ fn stream_pass(
                     attributes: options.attributes.clone(),
                     geometry_field: options.geometry_field.clone(),
                     input_crs: options.input_crs,
+                    // Only the first pass of a chosen maxzoom asks.
+                    regular_angles: record
+                        && options.max_zoom.is_none()
+                        && options.regular_angles_check,
                 },
                 // Known before the first feature for FlatGeobuf (header) and
                 // GeoJSON (parsed whole).
@@ -696,7 +896,7 @@ fn stream_pass(
             // Closed so the cutter's loop ends.
             drop(hand_over);
             let (pieces, layer, covered, tangled) = cutting.join().expect("the cutting thread");
-            Ok((skipped, pieces, layer, covered, tangled))
+            Ok((read, pieces, layer, covered, tangled))
         })?;
 
     // Nothing appends again.
@@ -727,7 +927,8 @@ fn stream_pass(
         pieces,
         layer,
         covered,
-        skipped,
+        skipped: read.skipped,
+        structure: read.structure,
         tangled,
         // Applied on maxzoom's own grid (`scale_down` runs first). `at.detail`,
         // not `extent_at`, which is wrong while the choice is pending.
@@ -2518,6 +2719,7 @@ mod tests {
             attributes: Attributes::All,
             geometry_field: None,
             input_crs: None,
+            regular_angles_check: true,
             extent: 4096,
             maxzoom_extent: None,
             ranker: "evenstar".to_string(),

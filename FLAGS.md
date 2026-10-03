@@ -45,6 +45,7 @@ simplification and what to drop by itself.
 | `-z`, `--max-zoom <Z>` | chosen | The deepest zoom to build. Chosen from the data when not set. |
 | `--min-auto-zoom <Z>` | `12` | The shallowest maxzoom that automatic selection is allowed to select. |
 | `--max-auto-zoom <Z>` | `16` | The deepest maxzoom that automatic selection is allowed to select. |
+| `--no-regular-angles-check` | off | Choose the maxzoom by the tile budgets alone, without going deeper to keep regular angles (such as right angles). |
 
 ## Geometry
 

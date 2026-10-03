@@ -35,6 +35,7 @@ fn job(max_zoom: u32, keep_store: bool) -> Job {
         attributes: lyv::Attributes::All,
         geometry_field: None,
         input_crs: None,
+        regular_angles_check: true,
         extent: 4096,
         maxzoom_extent: None,
         ranker: "evenstar".to_string(),

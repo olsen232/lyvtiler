@@ -92,6 +92,15 @@ struct Cli {
     #[arg(long, value_name = "CRS", value_parser = input_crs)]
     input_crs: Option<lyv_source::Crs>,
 
+    /// Choose the maxzoom by the tile budgets alone, without keeping regular
+    /// angles.
+    ///
+    /// When left to choose the maxzoom, lyv goes deep enough that a layer made
+    /// of regular angles (such as right angles) doesn't come get distorted; see
+    /// `--max-zoom`. This skips that check.
+    #[arg(long)]
+    no_regular_angles_check: bool,
+
     /// Output one line per stage instead of rewriting a line continuously to
     /// show progress updates.
     ///
@@ -130,6 +139,10 @@ struct Cli {
     min_zoom: u32,
 
     /// The deepest zoom to build. Chosen from the data when not set.
+    ///
+    /// Chosen as the shallowest from `--min-auto-zoom` whose tiles fit their
+    /// budgets, goes deeper when needed to preserve regular angles (such as
+    /// right angles) found in the input data.
     ///
     /// Setting too low will mean the maxzoom tiles won't contain all features.
     /// Setting too high bloats the output unnecessarily with extra tiles that
@@ -544,6 +557,7 @@ fn main() -> Result<()> {
         },
         geometry_field: cli.geometry_field,
         input_crs: cli.input_crs,
+        regular_angles_check: !cli.no_regular_angles_check,
         extent: cli.extent,
         maxzoom_extent: Some(maxzoom_extent),
         buffer: cli.buffer,

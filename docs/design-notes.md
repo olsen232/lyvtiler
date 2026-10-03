@@ -97,7 +97,8 @@ contract is four integers and a byte slice.
 1. **Read** each feature, project it onto a global integer grid, and record its
    size and attribute cost. Attributes go to the store.
 2. **Choose the maxzoom**, if not given, by cutting at a candidate zoom and
-   estimating its worst tile (§8).
+   estimating its worst tile, and deep enough to keep the layer's regular
+   angles (§8).
 3. **At maxzoom**, per feature: simplify, cut into tiles, check the pieces will
    close back to the feature's area, and note which tiles it swallows whole.
    Then close every tile's ring pieces, fill the swallowed tiles, and rank all
@@ -508,9 +509,34 @@ Told `-z 12`, that layer kept 3% of its features; left to choose, 55%.
 `crates/lyv/tests/auto_maxzoom.rs` checks that choosing a zoom builds exactly what asking
 for it builds.
 
-**The floor, 12, is usually the answer**, and it's the only thing defending
-resolution: the budget asks whether a tile is too big, never whether it's too
-coarse. At z12 with extent 8192 a unit is about 1 m at mid latitudes.
+**The floor, 12, is usually the answer.** At z12 with extent 8192 a unit is
+about 1 m at mid latitudes, finer than most data is accurate. The budget asks
+whether a tile is too big, never whether it's too coarse; regular angles are
+the one thing that asks that.
+
+**Regular angles: eighths and sixths of a turn.** A metre is plenty for
+floodplains, but snapped to a 1 m grid, a 6 m building's right angles bend by
+several degrees and it comes out off-square; 1 m flow paths traced along a
+raster lose their staircase of eighths; hexagons, their sixths. Those are the
+regular angles (`REGULAR_ANGLES`), and angles here are fractions of a turn.
+The first read measures every turn on the coordinates as given, before any
+grid, and if at least 25% are within a 400th of a turn of a regular angle
+(random angles give 5.0%), the layer has structure. A sample of its regular
+parts (200,000 vertices) is rounded onto each candidate grid, as the pipeline
+rounds, and simplified; the maxzoom is raised until 90% of those corners stay
+within a 100th of a turn, no deeper than the cap.
+
+| layer | regular turns | z12 keeps | raised to |
+|---|---:|---:|---|
+| building outlines | 91% | 48% | z15 |
+| overland flow paths | 95% | 8% | z16 |
+| estate hexagons | 89% | 65% | z14 (then z15, for tile size) |
+| vicmap parcels | 41% | 86% | z13 |
+| floodplains | 2.4% (eighths alone; sixths not measured) | — | stays z12 |
+
+Snapping does the damage, not simplification: dropping the simplification
+moved none of these. The extent can't help either: MapLibre uses no more than
+8192. Measuring costs about 6% of parse time on the reader thread.
 
 **The cap, 16, is about tile count.** At z16 a unit is already 2.6 cm, finer
 than cadastral survey accuracy — but more to the point, NZ land alone is 717k

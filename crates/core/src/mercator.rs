@@ -13,13 +13,22 @@ pub const MAX_LATITUDE: f64 = 85.051_128_779_806_59;
 /// Latitude is clamped to the world, so the poles land on its edge. Unclamped,
 /// 90 gave a meaningless y: the formula's terms are both 10^16 there.
 pub fn project_global(lon: f64, lat: f64, z: u32, extent: u32) -> (i64, i64) {
-    // Normalised world coordinates, 0..1, origin top-left.
+    onto_grid(project_unit(lon, lat), z, extent)
+}
+
+/// WGS84 lon/lat as a fraction of the Web Mercator world, 0..1 from the
+/// top-left: the projection before any grid. Angles are as on the ground,
+/// since Mercator is conformal.
+pub fn project_unit(lon: f64, lat: f64) -> (f64, f64) {
     let world_x = (lon + 180.0) / 360.0;
     let lat_rad = lat.clamp(-MAX_LATITUDE, MAX_LATITUDE).to_radians();
     let world_y = 0.5 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / (2.0 * std::f64::consts::PI);
+    (world_x, world_y)
+}
 
+/// A world fraction onto the global grid for zoom `z`.
+pub fn onto_grid((world_x, world_y): (f64, f64), z: u32, extent: u32) -> (i64, i64) {
     let world_units = f64::from(extent) * (1u64 << z) as f64;
-
     (
         (world_x * world_units).round() as i64,
         (world_y * world_units).round() as i64,
@@ -36,17 +45,15 @@ pub const WORLD_METRES: f64 = 20_037_508.342_789_244;
 /// scale; the two agree to within the last rounded unit. Northing runs up and
 /// the grid down, hence the subtraction.
 pub fn project_global_metres(x: f64, y: f64, z: u32, extent: u32) -> (i64, i64) {
-    // Normalised world coordinates, 0..1, origin top-left. Northing is
-    // clamped to the world, as latitude is.
+    onto_grid(project_unit_metres(x, y), z, extent)
+}
+
+/// EPSG:3857 metres as a fraction of the world, as [`project_unit`]. Northing
+/// is clamped to the world, as latitude is.
+pub fn project_unit_metres(x: f64, y: f64) -> (f64, f64) {
     let world_x = (x + WORLD_METRES) / (2.0 * WORLD_METRES);
     let world_y = (WORLD_METRES - y.clamp(-WORLD_METRES, WORLD_METRES)) / (2.0 * WORLD_METRES);
-
-    let world_units = f64::from(extent) * (1u64 << z) as f64;
-
-    (
-        (world_x * world_units).round() as i64,
-        (world_y * world_units).round() as i64,
-    )
+    (world_x, world_y)
 }
 
 /// The coordinate systems a source may be in. Both are Web Mercator — the
@@ -75,9 +82,15 @@ impl Crs {
 
     /// Project a coordinate in this CRS onto the global grid.
     pub fn project_global(self, x: f64, y: f64, z: u32, extent: u32) -> (i64, i64) {
+        onto_grid(self.project_unit(x, y), z, extent)
+    }
+
+    /// Project a coordinate in this CRS to a fraction of the world, before
+    /// any grid.
+    pub fn project_unit(self, x: f64, y: f64) -> (f64, f64) {
         match self {
-            Crs::Wgs84 => project_global(x, y, z, extent),
-            Crs::WebMercator => project_global_metres(x, y, z, extent),
+            Crs::Wgs84 => project_unit(x, y),
+            Crs::WebMercator => project_unit_metres(x, y),
         }
     }
 }

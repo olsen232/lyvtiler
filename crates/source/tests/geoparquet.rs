@@ -485,7 +485,8 @@ fn an_empty_geometry_is_dropped_as_having_none() {
             Ok(())
         },
     )
-    .unwrap();
+    .unwrap()
+    .skipped;
     // The point, and the MultiPoint without its empty point.
     assert_eq!(features.len(), 2);
     assert_eq!(features[1].parts.len(), 1);

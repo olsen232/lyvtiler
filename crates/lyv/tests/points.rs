@@ -65,6 +65,7 @@ fn build(body: &str) -> Collected {
         attributes: lyv::Attributes::All,
         geometry_field: None,
         input_crs: None,
+        regular_angles_check: true,
         extent: 4096,
         // One resolution everywhere, so the collapse test's halving is plain.
         maxzoom_extent: Some(4096),
