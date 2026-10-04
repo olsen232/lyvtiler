@@ -14,15 +14,15 @@ pub use lyv_core::{Chain, Local, Value};
 const MVT_VERSION: u32 = 2;
 
 /// Our attribute value as geozero's, which can write it.
-fn to_tile_value(value: &Value) -> TileValue {
+fn to_tile_value(value: Value) -> TileValue {
     match value {
-        Value::Str(s) => TileValue::Str(s.clone()),
-        Value::Float(f) => TileValue::Float(*f),
-        Value::Double(d) => TileValue::Double(*d),
-        Value::Int(i) => TileValue::Int(*i),
-        Value::Uint(u) => TileValue::Uint(*u),
-        Value::Sint(i) => TileValue::Sint(*i),
-        Value::Bool(b) => TileValue::Bool(*b),
+        Value::Str(s) => TileValue::Str(s),
+        Value::Float(f) => TileValue::Float(f),
+        Value::Double(d) => TileValue::Double(d),
+        Value::Int(i) => TileValue::Int(i),
+        Value::Uint(u) => TileValue::Uint(u),
+        Value::Sint(i) => TileValue::Sint(i),
+        Value::Bool(b) => TileValue::Bool(b),
     }
 }
 

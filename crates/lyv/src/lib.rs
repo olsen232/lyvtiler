@@ -1655,9 +1655,7 @@ pub fn encode(
     // Once, before the first level. Its own stage, or its seconds get booked
     // to whatever stage is open.
     progress.stage("attributes", None);
-    let attributes = timed(Spent::ReadFeatures, 0, || {
-        load_attributes(store, options.cpu_workers())
-    })?;
+    let attributes = timed(Spent::ReadFeatures, 0, || load_attributes(store))?;
 
     progress.stage("encoding", Some("tiles"));
     let all = store.count()?;
@@ -1712,141 +1710,61 @@ pub fn encode(
     Ok(())
 }
 
-/// One decoding worker's share, flat: a `Vec` and `String`s per feature peaked
-/// at 7.2 GB on floodplains.
-#[derive(Default)]
-struct Share {
-    /// `(schema index, value)`, every feature's run after the last.
-    entries: Vec<(u32, lyv_core::Value)>,
-    /// `(feature, start in `entries`, count)`.
-    spans: Vec<(u64, u32, u32)>,
-}
-
-/// Every feature's attributes, decoded once and held for the encode pass.
+/// Every feature's attributes, held for the encode pass as the store keeps
+/// them: one row of bytes each, decoded when a tile asks for it.
 ///
-/// Held because per-tile queries decoded each feature once per tile it touched.
+/// Held because a query per tile decoded each feature once per tile it
+/// touched, from SQLite. Not held decoded: a `Value` per attribute and a
+/// `String` per string took 14 GB for 14.5M addresses of 29 attributes, where
+/// their rows are a fraction of that. Decoding from memory costs little, and
+/// the encoder takes each value as decoded instead of copying it.
+///
 /// Indexed by id, since ids are dense from zero: a `Vec` beats a hash map.
-/// Keys aren't stored — entries hold indices into the store's
-/// [`Schema`](lyv_store::Schema) — and entries are flat vectors with a span
-/// per feature, not an allocation each.
-///
-/// The decoding workers' shares are kept as they are, not merged into one
-/// vector: merging held both at once, twice the table (29 GB on 14.5M
-/// addresses, against 2.4 GB for everything else).
+/// Keys aren't stored: rows hold indices into the store's
+/// [`Schema`](lyv_store::Schema).
 #[derive(Default)]
 struct Loaded {
     schema: lyv_store::Schema,
-    /// Each worker's entries, in id order across the shares.
-    shares: Vec<Vec<(u32, lyv_core::Value)>>,
-    /// Where each share starts, counting entries across all of them.
-    bases: Vec<u32>,
-    /// By feature id: start, counting across the shares, and count. `(0, 0)`
-    /// for none.
-    spans: Vec<(u32, u32)>,
+    /// Every row, end to end.
+    rows: Vec<u8>,
+    /// By feature id: start in `rows`, and length. `(0, 0)` for none.
+    spans: Vec<(u64, u32)>,
 }
 
 impl lyv_core::Attributes for Loaded {
-    fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, &lyv_core::Value)) {
+    fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, lyv_core::Value)) {
         let Some(&(start, len)) = self.spans.get(feature as usize) else {
             return;
         };
-        if len == 0 {
-            return;
-        }
-        // The share holding `start`: the last that begins at or before it. A
-        // feature's entries never straddle two.
-        let share = self.bases.partition_point(|&base| base <= start) - 1;
-        let local = (start - self.bases[share]) as usize;
-        for (key, value) in &self.shares[share][local..local + len as usize] {
+        let row = &self.rows[start as usize..start as usize + len as usize];
+        lyv_store::for_each_property(row, &mut |key, value| {
             let name = self
                 .schema
-                .name(*key)
+                .name(key)
                 .expect("a stored index is in the schema");
             visit(name, value);
-        }
+        });
     }
 }
 
-/// Read the whole attribute table into memory, decoding across every core.
-///
-/// Each worker fills its own exactly-sized flat arena (sized by counting
-/// first; guessing left 64% slack), and they're concatenated into one, so the
-/// only copy is the final one. The read itself is one serial statement.
-fn load_attributes(store: &dyn TileStore, workers: usize) -> Result<Loaded> {
-    // Stored rows concatenated into one buffer, not millions of `Vec`s.
-    let mut blobs: Vec<u8> = Vec::new();
-    let mut at: Vec<(u64, u32, u32)> = Vec::new();
-    store.for_each_feature(&mut |id, attrs| {
-        let start = u32::try_from(blobs.len()).context("the attribute table is over 4 GB")?;
-        blobs.extend_from_slice(attrs);
-        at.push((id, start, attrs.len() as u32));
+/// Read the whole attribute table into memory, as stored.
+fn load_attributes(store: &dyn TileStore) -> Result<Loaded> {
+    let mut loaded = Loaded {
+        schema: store.schema().clone(),
+        ..Loaded::default()
+    };
+    store.for_each_feature(&mut |id, row| {
+        let id = id as usize;
+        if loaded.spans.len() <= id {
+            loaded.spans.resize(id + 1, (0, 0));
+        }
+        loaded.spans[id] = (loaded.rows.len() as u64, row.len() as u32);
+        loaded.rows.extend_from_slice(row);
         Ok(())
     })?;
-    if at.is_empty() {
-        return Ok(Loaded::default());
-    }
-
-    let share = at.len().div_ceil(workers.max(1)).max(1);
-    let borrowed = &blobs;
-    let shares: Vec<Share> = std::thread::scope(|scope| {
-        let handles: Vec<_> = at
-            .chunks(share)
-            .map(|part| {
-                scope.spawn(move || {
-                    let row = |&(_, start, len): &(u64, u32, u32)| {
-                        &borrowed[start as usize..start as usize + len as usize]
-                    };
-                    let mut share = Share {
-                        entries: Vec::with_capacity(
-                            part.iter()
-                                .map(|at| lyv_store::count_properties(row(at)))
-                                .sum(),
-                        ),
-                        spans: Vec::with_capacity(part.len()),
-                    };
-                    for entry in part {
-                        let began = share.entries.len() as u32;
-                        lyv_store::for_each_property(row(entry), &mut |index, value| {
-                            share.entries.push((index, value));
-                        });
-                        let count = share.entries.len() as u32 - began;
-                        if count > 0 {
-                            share.spans.push((entry.0, began, count));
-                        }
-                    }
-                    share
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("an attribute decoding thread"))
-            .collect()
-    });
-    // Dropped before the merge, or the stored table sits on top of the new one.
-    drop(blobs);
-
-    let highest = at.last().map_or(0, |&(id, _, _)| id);
-    drop(at);
-
-    let mut loaded = Loaded {
-        shares: Vec::with_capacity(shares.len()),
-        bases: Vec::with_capacity(shares.len()),
-        spans: vec![(0, 0); highest as usize + 1],
-        // Workers decoded against the store's schema, so indices already agree.
-        schema: store.schema().clone(),
-    };
-    let mut base = 0u32;
-    for share in shares {
-        for (id, start, count) in share.spans {
-            loaded.spans[id as usize] = (base + start, count);
-        }
-        loaded.bases.push(base);
-        base = base
-            .checked_add(u32::try_from(share.entries.len()).context("too many attributes")?)
-            .context("over 4 billion attributes")?;
-        loaded.shares.push(share.entries);
-    }
+    // Grown by doubling while reading, so up to half of it is spare.
+    loaded.rows.shrink_to_fit();
+    loaded.spans.shrink_to_fit();
     Ok(loaded)
 }
 

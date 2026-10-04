@@ -26,7 +26,7 @@ Peak live **3,684 MB**, about a quarter of the input.
 | after ranks | 2.48 GB | the valley: z12's chains and the rank map |
 | merge z11 | 2.50 GB | one level, draining into the next |
 | each level above | about half the one below | |
-| attributes | 1.43 GB | the whole attribute table |
+| attributes | 1.43 GB | the whole attribute table, decoded (now held as stored rows; not remeasured) |
 | encoding | 1.84 GB | that table, plus a tile and its eight neighbours |
 
 What is alive after reading:
@@ -73,7 +73,7 @@ flowchart TD
     WRITE -->|"store.put"| TILES[("store &middot; tiles<br/>stage=Internal, all levels<br/>~3.5 GB")]
     WRITE -->|"decoded back, becomes the next children"| MERGE
 
-    FEAT -->|"attributes, 1.2s &mdash; decoded across every core<br/>into one flat arena, 1.43 GB"| ATTRS["attribute table<br/>38.2M entries, held through encoding"]
+    FEAT -->|"attributes &mdash; the stored rows, end to end"| ATTRS["attribute rows<br/>held through encoding, decoded per tile"]
     ATTRS --> ENCODE
     TILES -->|"encoding, 50.8s<br/>reads each tile + its 8 neighbours"| ENCODE["encode zN: buffer, cull, MVT, gzip<br/>peak 1.84 GB &mdash; almost all of it the table above"]
     ENCODE --> PMT[("floodplains.pmtiles&nbsp;&nbsp;2.12 GB")]
@@ -112,7 +112,8 @@ look like failures.
 
 **Measure memory as well as time.** Holding the attribute table in memory was
 committed on the strength of `--trace` alone, and turned out to peak at 7.2 GB
-until keys were interned and the rows put in one flat arena.
+until keys were interned and the rows put in one flat arena. It's now held as
+the store's rows, decoded per tile (below).
 
 ## Things worth knowing
 
@@ -134,17 +135,23 @@ resident against 3.7 GB live: the allocator keeps about 3.4 GB of freed pages
 rather than returning them. `--mmap` adds mapped file pages on top of that, per
 encode worker (see [speed.md](speed.md)).
 
-**The attribute table can set the peak.** Its load is 24% of the peak on
-floodplains, which is geometry-heavy. On 3.57M cadastral parcels, which are
-attribute-heavy, it's 90% — 1,003 MB against a 1,109 MB peak. A layer with more
-attributes per feature would make it the high-water mark.
+**The attribute table set the peak, so it's held as stored.** Decoded, it was a
+`Value` per attribute and a `String` per string. On 14.5M Australian addresses
+of 29 attributes each that came to 14 GB, and merging the decoding workers'
+shares held it twice: a 29 GB peak against 2.4 GB for everything else. It's now
+the store's own rows, end to end, and a feature's row is decoded when a tile
+asks for it. The encoder takes each decoded value rather than copying it, so
+that costs little. On the first 3M of those addresses:
 
-The fix, if that happens, is interning values as well as keys (values repeat
-about 13× on a buildings layer). It was built and reverted because it didn't
-move the peak. Interning per decode worker barely helps, because every worker
-sees every categorical value: with ten workers a value needs 16 repeats just to
-break even. Interning once, after the workers finish, halved the held table but
-cost 4.2 s on one thread.
+| | peak | encoding |
+|---|---:|---:|
+| decoded, merged | 6.0 GB | 11.7 s |
+| decoded, shares kept | 4.3 GB | 11.3 s |
+| stored rows | 1.1 GB | 11.3 s |
+
+On parcels, where a polygon is decoded once per tile it crosses, encoding's
+wall time didn't move, and its summed CPU rose 5–10%. Interning values, the
+earlier idea, isn't needed.
 
 ## What's left
 

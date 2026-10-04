@@ -598,47 +598,6 @@ pub fn for_each_property(bytes: &[u8], visit: &mut dyn FnMut(u32, Value)) {
     }
 }
 
-/// How many attributes a stored row holds, without decoding them, so the
-/// encode pass can size its arena exactly (guessing left 64% slack). Must agree
-/// with [`for_each_property`] on where a row ends;
-/// `counting_agrees_with_decoding` checks it.
-pub fn count_properties(bytes: &[u8]) -> usize {
-    let mut at = 0;
-    let mut count = 0;
-    while at < bytes.len() {
-        if take_varint(bytes, &mut at)
-            .and_then(|i| u32::try_from(i).ok())
-            .is_none()
-        {
-            malformed(bytes, at);
-        }
-        let Some(&tag) = bytes.get(at) else {
-            malformed(bytes, at)
-        };
-        at += 1;
-        let width = match tag {
-            tag::STR => match take_varint(bytes, &mut at) {
-                Some(len) => len as usize,
-                None => malformed(bytes, at),
-            },
-            tag::FLOAT => 4,
-            tag::DOUBLE => 8,
-            tag::INT | tag::UINT | tag::SINT => match take_varint(bytes, &mut at) {
-                Some(_) => 0,
-                None => malformed(bytes, at),
-            },
-            tag::FALSE | tag::TRUE => 0,
-            _ => malformed(bytes, at),
-        };
-        if at + width > bytes.len() {
-            malformed(bytes, at);
-        }
-        at += width;
-        count += 1;
-    }
-    count
-}
-
 /// A stored attribute row that doesn't decode.
 fn malformed(bytes: &[u8], at: usize) -> ! {
     panic!(
@@ -1044,32 +1003,21 @@ mod attribute_format {
     }
 
     #[test]
-    fn counting_agrees_with_decoding() {
-        // The encode pass sizes its arena from the count and fills it from the
-        // decode; a disagreement would silently double the arena mid-fill.
-        let mut schema = Schema::default();
-        let encoded = encode_properties(&mut schema, &every_kind());
-        assert_eq!(count_properties(&encoded), every_kind().len());
-    }
-
-    #[test]
     fn a_truncated_row_is_a_panic_not_fewer_attributes() {
         let mut schema = Schema::default();
         let encoded = encode_properties(&mut schema, &every_kind());
+        let whole = every_kind().len();
         for cut in 1..encoded.len() {
             let part = &encoded[..cut];
-            let decoding = std::panic::catch_unwind(|| for_each_property(part, &mut |_, _| {}));
-            let counting = std::panic::catch_unwind(|| count_properties(part));
+            let decoding = std::panic::catch_unwind(|| {
+                let mut decoded = 0;
+                for_each_property(part, &mut |_, _| decoded += 1);
+                decoded
+            });
             // A cut can land exactly between two attributes, leaving a
-            // shorter valid row; both must then agree.
-            match (decoding, counting) {
-                (Err(_), Err(_)) => {}
-                (Ok(()), Ok(count)) => {
-                    let mut decoded = 0;
-                    for_each_property(part, &mut |_, _| decoded += 1);
-                    assert_eq!(count, decoded, "truncated to {cut} bytes");
-                }
-                _ => panic!("decoding and counting disagree on {cut} bytes"),
+            // shorter valid row: fewer attributes, but only whole ones.
+            if let Ok(decoded) = decoding {
+                assert!(decoded < whole, "truncated to {cut} bytes");
             }
         }
     }

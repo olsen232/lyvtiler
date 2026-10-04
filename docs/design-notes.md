@@ -719,7 +719,7 @@ the metadata.
   re-derive it per level from boundary tiles.
 - **The vertex budget** is flat across zooms; perhaps it should scale.
 - **Where the attribute table stops scaling.** It's held in memory for the encode
-  pass. On an attribute-heavy layer its load already comes within 10% of the
-  run's peak ([memory.md](memory.md)).
+  pass, as the store's rows ([memory.md](memory.md)): a fraction of the decoded
+  size, but still all of them, including features dropped at every zoom.
 - **Attribute accumulation** (summing or averaging as features merge) isn't
   designed. A mean of means isn't a mean.

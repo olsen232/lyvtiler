@@ -162,16 +162,18 @@ impl Schema {
 /// Where an encoder finds a feature's attributes. A trait, not a map, so
 /// implementations can hold keys as indices instead of a string per feature.
 pub trait Attributes {
-    /// Hand this feature's attributes to `visit`, in writing order.
-    fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, &Value));
+    /// Hand this feature's attributes to `visit`, in writing order. Each value
+    /// is handed over, not lent: the encoder keeps it, and a value decoded on
+    /// demand needn't be copied again.
+    fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, Value));
 }
 
 /// The simple implementation, for tests. The encode pass uses a denser one.
 impl Attributes for std::collections::BTreeMap<u64, Vec<(String, Value)>> {
-    fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, &Value)) {
+    fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, Value)) {
         if let Some(properties) = self.get(&feature) {
             for (key, value) in properties {
-                visit(key, value);
+                visit(key, value.clone());
             }
         }
     }
