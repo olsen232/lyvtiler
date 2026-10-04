@@ -1727,13 +1727,21 @@ struct Share {
 /// Held because per-tile queries decoded each feature once per tile it touched.
 /// Indexed by id, since ids are dense from zero: a `Vec` beats a hash map.
 /// Keys aren't stored — entries hold indices into the store's
-/// [`Schema`](lyv_store::Schema) — and entries are one flat vector with a span
+/// [`Schema`](lyv_store::Schema) — and entries are flat vectors with a span
 /// per feature, not an allocation each.
+///
+/// The decoding workers' shares are kept as they are, not merged into one
+/// vector: merging held both at once, twice the table (29 GB on 14.5M
+/// addresses, against 2.4 GB for everything else).
 #[derive(Default)]
 struct Loaded {
     schema: lyv_store::Schema,
-    entries: Vec<(u32, lyv_core::Value)>,
-    /// By feature id: start in `entries`, and count. `(0, 0)` for none.
+    /// Each worker's entries, in id order across the shares.
+    shares: Vec<Vec<(u32, lyv_core::Value)>>,
+    /// Where each share starts, counting entries across all of them.
+    bases: Vec<u32>,
+    /// By feature id: start, counting across the shares, and count. `(0, 0)`
+    /// for none.
     spans: Vec<(u32, u32)>,
 }
 
@@ -1742,7 +1750,14 @@ impl lyv_core::Attributes for Loaded {
         let Some(&(start, len)) = self.spans.get(feature as usize) else {
             return;
         };
-        for (key, value) in &self.entries[start as usize..start as usize + len as usize] {
+        if len == 0 {
+            return;
+        }
+        // The share holding `start`: the last that begins at or before it. A
+        // feature's entries never straddle two.
+        let share = self.bases.partition_point(|&base| base <= start) - 1;
+        let local = (start - self.bases[share]) as usize;
+        for (key, value) in &self.shares[share][local..local + len as usize] {
             let name = self
                 .schema
                 .name(*key)
@@ -1815,19 +1830,22 @@ fn load_attributes(store: &dyn TileStore, workers: usize) -> Result<Loaded> {
     drop(at);
 
     let mut loaded = Loaded {
-        // Exact, so the arena never doubles: a doubling realloc holds old and
-        // new at once.
-        entries: Vec::with_capacity(shares.iter().map(|s| s.entries.len()).sum()),
+        shares: Vec::with_capacity(shares.len()),
+        bases: Vec::with_capacity(shares.len()),
         spans: vec![(0, 0); highest as usize + 1],
         // Workers decoded against the store's schema, so indices already agree.
         schema: store.schema().clone(),
     };
+    let mut base = 0u32;
     for share in shares {
-        let base = loaded.entries.len() as u32;
-        loaded.entries.extend(share.entries);
         for (id, start, count) in share.spans {
             loaded.spans[id as usize] = (base + start, count);
         }
+        loaded.bases.push(base);
+        base = base
+            .checked_add(u32::try_from(share.entries.len()).context("too many attributes")?)
+            .context("over 4 billion attributes")?;
+        loaded.shares.push(share.entries);
     }
     Ok(loaded)
 }
