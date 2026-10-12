@@ -3,7 +3,7 @@
 
 I haven't yet put any time trying to find out what parts of _`lyv`_ might be useful in spite of `tylertoo` - which, let's face it, will be the more powerful general-purpose tool from this point on. It could be, for instance, that _`lyv`_ is still good at choosing defaults for you that mean you don't need to read through the list of flags, and _`lyv`_ is certainly performant enough if you don't need to shard the job onto multiple machines (if you do, then you need `tylertoo` instead).
 
-Eventually I will probably need to switch to tylertoo myself so version 0.1.0 of _`lyv`_ is probably as far as this will get.
+Eventually I will probably need to switch to `tylertoo` myself so version 0.1.0 of _`lyv`_ is probably as far as this will get.
 I'll write some more about this at `BACKGROUND.md`. Anyway, here is _`lyv`_
 
 
