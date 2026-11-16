@@ -79,6 +79,46 @@ flowchart TD
     ENCODE --> PMT[("floodplains.pmtiles&nbsp;&nbsp;2.12 GB")]
 ```
 
+## Landonline: Vector: 30.6M two-point lines, 2.3 GB in
+
+Floodplains is a few large features; this is the opposite, tens of millions of
+tiny ones, and it ran out of a 12 GiB container. The points are the least of it
+(62M, 1.2 GB): the peak was per-feature bookkeeping, and grew with the maxzoom
+search, because the ranking grid is deeper than maxzoom.
+
+| stage | peak before | after | |
+|---|---:|---:|---|
+| reading, z15 pass | 9,643 MB | 4,813 MB | ranking buckets 4.1 GB → 2.2 GB |
+| **ranking** | **11,500 MB** | **5,968 MB** | no second copy of the buckets |
+| the climb, z15 → z14 | 3,683 MB | 2,791 MB | the rank map as an array |
+| whole run, exact | 11,501 MB | 6,539 MB | footprint 14.1 GB → 7.8 GB |
+
+Measured with `-j 4`, as the tiler container runs it. Output byte-identical.
+
+Two changes:
+
+- **Per-feature values in arrays.** Sizes, attribute costs, ranks, the climb's
+  rank map, polygon flags and the encode pass's attribute spans were
+  `HashMap<u64, _>`s: 58.7M slots of key, value and control byte for 30.6M
+  features. `lyv_core::PerFeature` holds them as a `Vec` from the first id it
+  sees, plus a presence bitset, and falls back to a map when ids are sparse —
+  which also stopped a GeoJSON with large ids of its own allocating an array up
+  to its largest id (2×10¹¹ entries) until it was killed. −2.2 GB.
+- **Ranking buckets as one sorted list.** At z15 the grid held 41.9M buckets of
+  about three ids: a `Vec` per bucket in a `BTreeMap` was 4.1 GB, three times
+  the ids, and drawing built a second set of 41.9M `Vec`s. Now one
+  `Vec<(scrambled bucket, id)>`, sorted into visiting order (the scramble is a
+  bijection, so there are no ties) and drawn in place. −3.3 GB more.
+
+What's alive after the z15 pass, before and after. The run only reports its
+breakdown after the first pass, so the "after" size of the list is worked out
+(16 bytes a pair), not measured:
+
+```
+before   layer  4123 MB  41,865,030 buckets, 136,666,088 ids    pieces 1519 MB
+after    layer ≈2187 MB  one list of 136,666,088 pairs          pieces 1519 MB
+```
+
 ## How it got here
 
 | | peak live | |
