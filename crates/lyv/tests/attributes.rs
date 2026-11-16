@@ -66,6 +66,7 @@ fn build(max_zoom: u32) -> Built {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 64,
         simplification: lyv_simplify::Tolerance::Distance(1.0),
@@ -333,6 +334,7 @@ fn a_key_used_with_two_types_is_declared_as_a_string() {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::NONE,
@@ -379,6 +381,7 @@ fn an_mbtiles_archive_declares_the_same_layers() {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::NONE,

@@ -61,6 +61,7 @@ fn build(input: &Path, output: &Path) -> Options {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 64,
         simplification: lyv_simplify::Tolerance::Distance(1.0),

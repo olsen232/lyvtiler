@@ -255,6 +255,17 @@ struct Cli {
     #[arg(long, default_value_t = 50_000)]
     max_tile_features: usize,
 
+    /// How far maxzoom tiles may exceed --max-tile-bytes and
+    /// --max-tile-features before features are dropped there.
+    ///
+    /// Features dropped from a lower zoom are still in the zooms below it, but
+    /// one dropped from maxzoom is gone from the tileset. This lets a dense
+    /// area keep all its features in a few heavier tiles, rather than every
+    /// tile losing some. Only matters when maxzoom is capped by
+    /// --max-auto-zoom or set by --max-zoom.
+    #[arg(long, default_value_t = 2.0)]
+    maxzoom_limit_scale: f64,
+
     /// Simplify using Douglas-Peucker: discard
     /// vertices closer than D tile units to the chord through their
     /// neighbours.
@@ -513,6 +524,13 @@ fn main() -> Result<()> {
         progress.say(&format!("Maxzoom-extent changed to {maxzoom_extent}"));
     }
 
+    if !(cli.maxzoom_limit_scale.is_finite() && cli.maxzoom_limit_scale >= 1.0) {
+        anyhow::bail!(
+            "--maxzoom-limit-scale {} must be at least 1",
+            cli.maxzoom_limit_scale
+        );
+    }
+
     // Refused, not clamped: a negative mapping is a typo.
     if cli.mmap.is_nan() || cli.mmap < 0.0 {
         anyhow::bail!("--mmap {} is not a size in GB", cli.mmap);
@@ -572,6 +590,7 @@ fn main() -> Result<()> {
             bytes: cli.max_tile_bytes,
             features: max_tile_features,
         },
+        maxzoom_limit_scale: cli.maxzoom_limit_scale,
         max_tile_vertices: cli.max_tile_vertices,
         simplification: match cli.simplify_area {
             Some(area) => lyv_simplify::Tolerance::Area(area),

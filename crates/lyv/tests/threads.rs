@@ -94,6 +94,7 @@ fn build_from(threads: usize, body: String) -> Built {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         // A real buffer, so the nine-tile read happens.
         buffer: 64,

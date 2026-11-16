@@ -80,6 +80,7 @@ fn build(max_tile_vertices: usize) -> Built {
             bytes: 0,
             features: 0,
         },
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::Distance(1.0),

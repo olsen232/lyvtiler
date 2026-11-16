@@ -65,6 +65,11 @@ pub struct Options {
     pub ranker: String,
     /// Per-tile limits before features are dropped. Zero means no limit.
     pub limits: lyv_rank::Limits,
+    /// How far maxzoom's tiles may exceed `limits` before features are
+    /// dropped there. Above it a zoom can drop and the next one down still has
+    /// them; at maxzoom a dropped feature is gone. The selection still looks
+    /// for a zoom within `limits`; this only matters when it's capped.
+    pub maxzoom_limit_scale: f64,
     /// How many vertices a tile may hold before the climb simplifies ahead.
     /// Zero means no limit. A separate lever from `limits`: dropping hardly
     /// thins geometry (the ranking keeps the big features), and simplifying
@@ -133,6 +138,11 @@ impl Options {
     /// The deepest zoom this run could build: the chosen one, or the automatic
     /// cap. Also the grid everything is projected onto before the maxzoom is
     /// chosen, then scaled down to it (§4).
+    /// The limits a maxzoom tile is held to.
+    pub fn maxzoom_limits(&self) -> lyv_rank::Limits {
+        self.limits.scaled(self.maxzoom_limit_scale)
+    }
+
     pub fn deepest(&self) -> u32 {
         self.max_zoom.unwrap_or(self.max_auto_zoom)
     }
@@ -339,9 +349,20 @@ pub fn ingest(
 
         if overflow <= 1.0 || z >= cap {
             if overflow > 1.0 {
-                progress.say(&format!(
-                    "  capped at z{cap}; the rest comes off by dropping features"
-                ));
+                let still = options.maxzoom_limits().overflow(worst);
+                progress.say(&if still > 1.0 {
+                    format!(
+                        "  capped at z{cap}; {still:.1}x over even at {}x the limits for maxzoom, \
+                         so the rest comes off by dropping features",
+                        options.maxzoom_limit_scale
+                    )
+                } else {
+                    format!(
+                        "  capped at z{cap}; within {}x the limits allowed at maxzoom, so every \
+                         feature is kept",
+                        options.maxzoom_limit_scale
+                    )
+                });
             }
             break (
                 z,
@@ -1371,7 +1392,7 @@ pub fn merge_up(
     // Maxzoom is thinned like any level, in memory, on the level ingest handed
     // over.
     let deepest = options.deepest();
-    let overflow = options.limits.overflow(maxzoom_worst);
+    let overflow = options.maxzoom_limits().overflow(maxzoom_worst);
     let narrowed = lyv_rank::narrow(cutoff, overflow);
     if narrowed < cutoff {
         progress.stage(&format!("thin z{deepest}"), Some("tiles"));
@@ -1390,7 +1411,7 @@ pub fn merge_up(
             )?;
         }
         progress.say(&format!(
-            "  z{deepest} worst tile {} KB / {} features, {overflow:.1}x over: keeping {narrowed} of {cutoff} features",
+            "  z{deepest} worst tile {} KB / {} features, {overflow:.1}x over its limits: keeping {narrowed} of {cutoff} features",
             maxzoom_worst.bytes / 1024,
             maxzoom_worst.features,
         ));
@@ -2704,6 +2725,7 @@ mod tests {
                 bytes: 0,
                 features: 0,
             },
+            maxzoom_limit_scale: 1.0,
             max_tile_vertices: 0,
             buffer: 0,
             simplification: lyv_simplify::Tolerance::NONE,

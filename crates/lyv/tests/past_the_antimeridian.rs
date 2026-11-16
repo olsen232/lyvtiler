@@ -38,6 +38,7 @@ fn options(dir: &tempfile::TempDir, source: &str, max_zoom: u32) -> Options {
             bytes: 0,
             features: 0,
         },
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::NONE,

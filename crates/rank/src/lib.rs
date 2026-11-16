@@ -264,6 +264,15 @@ impl Worst {
 }
 
 impl Limits {
+    /// These limits times `scale`; no limit stays no limit.
+    pub fn scaled(&self, scale: f64) -> Self {
+        let times = |limit: usize| (limit as f64 * scale).round() as usize;
+        Self {
+            bytes: times(self.bytes),
+            features: times(self.features),
+        }
+    }
+
     /// How far past the limits the worst tile is, at least 1: the larger of the
     /// two breaches.
     pub fn overflow(&self, worst: Worst) -> f64 {

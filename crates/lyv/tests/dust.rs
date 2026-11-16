@@ -73,6 +73,7 @@ fn build(dust: bool, geometry: &str) -> Built {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         keep_store: true,

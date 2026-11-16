@@ -48,6 +48,10 @@ struct Built {
 }
 
 fn build(across: i64, limits: Limits) -> Built {
+    build_scaled(across, limits, 1.0)
+}
+
+fn build_scaled(across: i64, limits: Limits, maxzoom_limit_scale: f64) -> Built {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("squares.geojson");
     std::fs::write(&input, source(across)).unwrap();
@@ -77,6 +81,7 @@ fn build(across: i64, limits: Limits) -> Built {
         keep_store: true,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         limits,
+        maxzoom_limit_scale,
         // No vertex budget: these tests vary the feature budget.
         max_tile_vertices: 0,
         buffer: 0,
@@ -229,4 +234,46 @@ fn the_same_features_are_dropped_everywhere_in_a_level() {
             );
         }
     }
+}
+
+/// The most features any one tile holds at `zoom`.
+fn fullest_tile(built: &Built, zoom: u32) -> usize {
+    let store = SqliteStore::open(&built.options.store).unwrap();
+    let mut fullest = 0;
+    store
+        .for_each_at(zoom, &mut |_, data| {
+            let features: HashSet<u64> = lyv_mvt::decode_chains(&data)
+                .unwrap()
+                .into_iter()
+                .map(|chain| chain.feature)
+                .collect();
+            fullest = fullest.max(features.len());
+            Ok(())
+        })
+        .unwrap();
+    fullest
+}
+
+#[test]
+fn maxzoom_may_run_over_its_limits_by_the_scale_before_dropping() {
+    let loose = build(12, UNLIMITED);
+    let everything = survivors(&loose)[&6].len();
+    // A third over the budget: dropped at the plain limit, kept at twice it.
+    let budget = Limits {
+        bytes: 0,
+        features: fullest_tile(&loose, 6) * 3 / 4,
+    };
+
+    let strict = survivors(&build_scaled(12, budget, 1.0));
+    assert!(
+        strict[&6].len() < everything,
+        "maxzoom kept all {everything} features a third over its budget"
+    );
+
+    let scaled = survivors(&build_scaled(12, budget, 2.0));
+    assert_eq!(
+        scaled[&6].len(),
+        everything,
+        "maxzoom dropped features within twice its budget"
+    );
 }

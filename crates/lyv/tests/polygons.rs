@@ -67,6 +67,7 @@ fn build(max_zoom: u32, simplify: lyv_simplify::Tolerance, buffer: u32) -> Built
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer,
         simplification: simplify,
@@ -509,6 +510,7 @@ fn a_hole_inside_a_single_tile_still_gets_its_exterior() {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::NONE,
@@ -752,6 +754,7 @@ fn the_encode_pass_never_empties_a_tile_that_had_geometry() {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 64,
         simplification: lyv_simplify::Tolerance::Distance(1.0),
@@ -877,6 +880,7 @@ fn a_ring_that_collapses_never_becomes_a_hole() {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 64,
         simplification: lyv_simplify::Tolerance::Distance(1.0),

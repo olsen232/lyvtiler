@@ -65,6 +65,7 @@ fn build(max_zoom: u32, buffer: u32) -> Built {
             features: 0,
         },
         // No vertex budget, which would coarsen the geometry.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer,
         simplification: lyv_simplify::Tolerance::NONE,

@@ -62,6 +62,7 @@ fn options(dir: &Path, input: &Path) -> Options {
             bytes: 0,
             features: 0,
         },
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::Distance(1.0),

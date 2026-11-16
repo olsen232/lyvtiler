@@ -81,6 +81,7 @@ fn build_with(
         threads: 1,
         limits,
         // No vertex budget: these tests vary the feature budget.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         keep_store: true,
@@ -284,6 +285,7 @@ fn build_body(body: &str) -> Built {
         dust: true,
         threads: 1,
         limits: ROOMY,
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         keep_store: true,

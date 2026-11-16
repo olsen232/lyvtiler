@@ -69,6 +69,7 @@ fn build(rank_depth: u32, limits: Limits) -> Built {
         threads: 1,
         limits,
         // No vertex budget: these tests vary the feature budget.
+        maxzoom_limit_scale: 1.0,
         max_tile_vertices: 0,
         buffer: 0,
         keep_store: true,
