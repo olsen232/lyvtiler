@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 lyv-core.workspace = true
 anyhow.workspace = true
+flate2.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 

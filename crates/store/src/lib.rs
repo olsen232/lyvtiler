@@ -63,9 +63,11 @@ pub trait TileStore {
     /// A feature's rank and attribute cost, or `None` if not ranked.
     fn rank(&self, id: u64) -> Result<Option<(u32, u32)>>;
 
-    /// Every feature's attributes, as stored, in one pass. Undecoded, so the
-    /// caller can decode across every core; see [`for_each_property`] and
-    /// [`schema`](Self::schema).
+    /// Every feature's attributes, as stored, in one pass, in the order put.
+    /// Undecoded, so the caller can decode across every core; see
+    /// [`for_each_property`] and [`schema`](Self::schema). A feature put twice
+    /// comes twice, the replacement second, so a caller keeping the last has
+    /// the one [`feature`](Self::feature) returns.
     fn for_each_feature(&self, visit: &mut dyn FnMut(u64, &[u8]) -> Result<()>) -> Result<()>;
 
     /// Every feature's rank and attribute cost, for thinning.
@@ -90,6 +92,49 @@ pub struct SqliteStore {
     /// before any row indexing into it is read, so it's saved with the flush
     /// every read performs.
     schema_dirty: std::cell::Cell<bool>,
+    /// Attribute rows not yet written: they go in compressed blocks of
+    /// [`BLOCK_ROWS`], since one row alone hardly compresses.
+    block: std::cell::RefCell<Block>,
+}
+
+/// Rows per attribute block. On Landonline parcels a row is 133 bytes, and
+/// deflate shrinks them 1.1x one at a time, 5.8x in 64s and 7.6x in 1024s:
+/// 9.1 GB of store down to about 1.2 GB.
+const BLOCK_ROWS: usize = 1024;
+
+/// Attribute rows on their way to a block: each an id and a length as
+/// varints, then the row.
+#[derive(Default)]
+struct Block {
+    rows: usize,
+    min_id: u64,
+    max_id: u64,
+    bytes: Vec<u8>,
+}
+
+/// Every row in a decompressed block, in the order put. A later row for the
+/// same id replaces an earlier one, so readers take the last.
+fn for_each_row(block: &[u8], visit: &mut dyn FnMut(u64, &[u8]) -> Result<()>) -> Result<()> {
+    let mut at = 0;
+    while at < block.len() {
+        let id = take_varint(block, &mut at).context("a truncated attribute block")?;
+        let len = take_varint(block, &mut at).context("a truncated attribute block")? as usize;
+        let row = block
+            .get(at..at + len)
+            .context("a truncated attribute block")?;
+        at += len;
+        visit(id, row)?;
+    }
+    Ok(())
+}
+
+fn inflate(compressed: &[u8], into: &mut Vec<u8>) -> Result<()> {
+    use std::io::Read;
+    into.clear();
+    flate2::read::DeflateDecoder::new(compressed)
+        .read_to_end(into)
+        .context("decompressing an attribute block")?;
+    Ok(())
 }
 
 /// Where the attribute schema is kept in the `job` table.
@@ -168,9 +213,12 @@ impl SqliteStore {
         // a level reads back in PMTiles order.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS job (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS features (
-                 id    INTEGER PRIMARY KEY,
-                 attrs BLOB NOT NULL
+             -- Attribute rows, deflated in blocks (see `Block`). Read whole,
+             -- in the order written; the id range finds one feature's block.
+             CREATE TABLE IF NOT EXISTS feature_blocks (
+                 min_id INTEGER NOT NULL,
+                 max_id INTEGER NOT NULL,
+                 data   BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS ranks (
                  id         INTEGER PRIMARY KEY,
@@ -224,7 +272,27 @@ impl SqliteStore {
             pending: std::cell::Cell::new(0),
             schema,
             schema_dirty: std::cell::Cell::new(false),
+            block: std::cell::RefCell::new(Block::default()),
         })
+    }
+
+    /// Write the rows held back for a block, if any.
+    fn write_block(&self) -> Result<()> {
+        // Taken first: the write below may flush, which comes back here.
+        let block = std::mem::take(&mut *self.block.borrow_mut());
+        if block.rows == 0 {
+            return Ok(());
+        }
+        let mut deflate =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut deflate, &block.bytes)?;
+        let data = deflate.finish()?;
+        self.wrote()?;
+        self.conn.execute(
+            "INSERT INTO feature_blocks (min_id, max_id, data) VALUES (?1, ?2, ?3)",
+            (block.min_id as i64, block.max_id as i64, data),
+        )?;
+        Ok(())
     }
 
     /// Write the schema to `job`, as JSON: a key name could contain a newline.
@@ -335,6 +403,7 @@ impl TileStore for SqliteStore {
         // Before the commit, so that the schema and the rows that index into
         // it land in the same transaction. A row visible without its names
         // would decode to nothing.
+        self.write_block()?;
         if self.schema_dirty.get() {
             self.save_schema()?;
             self.schema_dirty.set(false);
@@ -352,11 +421,23 @@ impl TileStore for SqliteStore {
         if self.schema.len() != before {
             self.schema_dirty.set(true);
         }
-        self.wrote()?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO features (id, attrs) VALUES (?1, ?2)",
-            (id as i64, attrs),
-        )?;
+        let full = {
+            let mut block = self.block.borrow_mut();
+            if block.rows == 0 {
+                block.min_id = id;
+                block.max_id = id;
+            }
+            block.min_id = block.min_id.min(id);
+            block.max_id = block.max_id.max(id);
+            put_varint(&mut block.bytes, id);
+            put_varint(&mut block.bytes, attrs.len() as u64);
+            block.bytes.extend_from_slice(&attrs);
+            block.rows += 1;
+            block.rows >= BLOCK_ROWS
+        };
+        if full {
+            self.write_block()?;
+        }
         Ok(())
     }
 
@@ -367,15 +448,27 @@ impl TileStore for SqliteStore {
     fn feature(&self, id: u64) -> Result<Option<Vec<(String, Value)>>> {
         // A write must always be readable straight back.
         self.flush()?;
-        let stored: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT attrs FROM features WHERE id = ?1",
-                [id as i64],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(stored.map(|attrs| decode_properties(&self.schema, &attrs)))
+        // Newest block first, and the last row within it: a later put wins.
+        let mut statement = self.conn.prepare(
+            "SELECT data FROM feature_blocks WHERE min_id <= ?1 AND max_id >= ?1
+             ORDER BY rowid DESC",
+        )?;
+        let mut blocks = statement.query([id as i64])?;
+        let mut block = Vec::new();
+        while let Some(stored) = blocks.next()? {
+            inflate(stored.get_ref(0)?.as_blob()?, &mut block)?;
+            let mut found = None;
+            for_each_row(&block, &mut |row_id, row| {
+                if row_id == id {
+                    found = Some(decode_properties(&self.schema, row));
+                }
+                Ok(())
+            })?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
     }
 
     fn put_ranks(&mut self, ranks: &[(u64, u32, u32)]) -> Result<()> {
@@ -413,13 +506,15 @@ impl TileStore for SqliteStore {
 
     fn for_each_feature(&self, visit: &mut dyn FnMut(u64, &[u8]) -> Result<()>) -> Result<()> {
         self.flush()?;
-        let mut statement = self.conn.prepare("SELECT id, attrs FROM features")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            // Borrowed from SQLite's page, not copied: this runs millions of
-            // times and the caller copies into its arena anyway.
-            visit(id as u64, row.get_ref(1)?.as_blob()?)?;
+        let mut statement = self
+            .conn
+            .prepare("SELECT data FROM feature_blocks ORDER BY rowid")?;
+        let mut blocks = statement.query([])?;
+        // Reused: a block is about 130 KB, and there are tens of thousands.
+        let mut block = Vec::new();
+        while let Some(stored) = blocks.next()? {
+            inflate(stored.get_ref(0)?.as_blob()?, &mut block)?;
+            for_each_row(&block, visit)?;
         }
         Ok(())
     }
@@ -1144,5 +1239,33 @@ mod attribute_format {
             binary * 2 < json,
             "expected the binary row to more than halve {json} bytes, got {binary}"
         );
+    }
+
+    #[test]
+    fn attributes_span_blocks_and_a_replacement_wins_across_them() {
+        let mut s = SqliteStore::in_memory().unwrap();
+        let numbered = |n: i64| vec![("n".to_string(), Value::Int(n))];
+        let total = 3 * BLOCK_ROWS as u64 + 7;
+        for id in 0..total {
+            s.put_feature(id, &numbered(id as i64)).unwrap();
+        }
+        // Replaced from a later block than its first.
+        s.put_feature(5, &numbered(-5)).unwrap();
+
+        assert_eq!(s.feature(5).unwrap(), Some(numbered(-5)));
+        assert_eq!(
+            s.feature(total - 1).unwrap(),
+            Some(numbered(total as i64 - 1))
+        );
+        assert_eq!(s.feature(total).unwrap(), None);
+
+        let mut seen = Vec::new();
+        s.for_each_feature(&mut |id, row| {
+            seen.push((id, decode_properties(s.schema(), row)));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen.len() as u64, total + 1);
+        assert_eq!(seen.last().unwrap(), &(5, numbered(-5)));
     }
 }

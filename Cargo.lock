@@ -1389,6 +1389,7 @@ name = "lyv-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "lyv-core",
  "rusqlite",
  "serde_json",
