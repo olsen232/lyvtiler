@@ -56,6 +56,7 @@ fn each_feature_keeps_its_own_kind_at_every_zoom() {
         dust: true,
         threads: 1,
         keep_store: false,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         limits: lyv::Limits {
             bytes: 0,

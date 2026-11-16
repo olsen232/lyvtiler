@@ -74,6 +74,7 @@ fn build(max_tile_vertices: usize) -> Built {
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No feature limits, so any change is the vertex budget's.
         limits: Limits {

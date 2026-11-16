@@ -60,14 +60,15 @@ fn build(max_zoom: u32, simplify: lyv_simplify::Tolerance, buffer: u32) -> Built
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No limits: these tests check exact geometry.
         limits: lyv::Limits {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         buffer,
         simplification: simplify,
@@ -503,14 +504,15 @@ fn a_hole_inside_a_single_tile_still_gets_its_exterior() {
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No limits: these tests check exact geometry.
         limits: lyv::Limits {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         buffer: 0,
         simplification: lyv_simplify::Tolerance::NONE,
@@ -747,14 +749,15 @@ fn the_encode_pass_never_empties_a_tile_that_had_geometry() {
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No limits: these tests check exact geometry.
         limits: lyv::Limits {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         buffer: 64,
         simplification: lyv_simplify::Tolerance::Distance(1.0),
@@ -873,14 +876,15 @@ fn a_ring_that_collapses_never_becomes_a_hole() {
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No limits: these tests check exact geometry.
         limits: lyv::Limits {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         buffer: 64,
         simplification: lyv_simplify::Tolerance::Distance(1.0),

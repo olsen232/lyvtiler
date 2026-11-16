@@ -74,6 +74,7 @@ fn build(body: &str) -> Collected {
         dust: true,
         threads: 1,
         keep_store: false,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         limits: Limits {
             bytes: 0,

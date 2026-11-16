@@ -89,6 +89,10 @@ pub struct Options {
     /// Keep the intermediate store after a successful run, for inspecting the
     /// pyramid (`inspect`, `rank_stats`).
     pub keep_store: bool,
+    /// Delete the input once it's been read, which is before ranking: from
+    /// there the store has everything. For a disk with no room for both, like
+    /// the tiler's.
+    pub delete_input: bool,
     /// Bytes of the store to memory-map, per connection. Zero maps nothing;
     /// see [`lyv_store::DEFAULT_MMAP_BYTES`].
     pub mmap_bytes: u64,
@@ -379,6 +383,12 @@ pub fn ingest(
         let levels = (overflow.log2() / 2.0).ceil().max(1.0) as u32;
         z = (z + levels).min(cap);
     };
+
+    // Read for the last time: every pass that reads it has finished.
+    if options.delete_input {
+        std::fs::remove_file(&options.input)
+            .with_context(|| format!("deleting {}", options.input.display()))?;
+    }
 
     // Only for the kept pass: each probe's tile boundaries give a different
     // count.
@@ -1393,7 +1403,16 @@ pub fn merge_up(
     // over.
     let deepest = options.deepest();
     let overflow = options.maxzoom_limits().overflow(maxzoom_worst);
-    let narrowed = lyv_rank::narrow(cutoff, overflow);
+    let narrowed = if overflow > 1.0 {
+        level_cutoff(
+            children
+                .values()
+                .map(|chains| tile_cutoff(chains, None, &ranks, options.maxzoom_limits())),
+            cutoff,
+        )
+    } else {
+        cutoff
+    };
     if narrowed < cutoff {
         progress.stage(&format!("thin z{deepest}"), Some("tiles"));
         progress.expect(children.len() as u64);
@@ -1455,7 +1474,7 @@ pub fn merge_up(
 
         progress.stage(&format!("merge z{z}"), Some("tiles"));
         // Taken: the merge consumes the level, leaving an empty map to refill.
-        let (mut parents, worst) = merge_level_in_parallel(
+        let (mut parents, worst, fits) = merge_level_in_parallel(
             std::mem::take(&mut children),
             options,
             options.simplification.coarsened(lead),
@@ -1469,7 +1488,7 @@ pub fn merge_up(
         // Measured as merged, then thinned before storing, so dropping makes
         // the rest of the climb cheaper.
         let overflow = options.limits.overflow(worst);
-        let narrowed = lyv_rank::narrow(cutoff, overflow);
+        let narrowed = fits.map_or(cutoff, |fits| fits.min(cutoff));
         if narrowed < cutoff {
             progress.stage(&format!("thin z{z}"), Some("tiles"));
             progress.expect(parents.len() as u64);
@@ -1556,7 +1575,7 @@ fn merge_level_in_parallel(
     ranks: &lyv_core::PerFeature<(u32, u32)>,
     workers: usize,
     progress: &Progress,
-) -> (Vec<Parent>, lyv_rank::Worst) {
+) -> (Vec<Parent>, lyv_rank::Worst, Option<u32>) {
     // Where each parent's tiny polygons are, gathered before merging: a ring
     // small enough to round into a sliver is cancelled by the seam sweep and
     // never reaches `drop_collapsed` (64 features in, 12 out, none dropped).
@@ -1590,10 +1609,12 @@ fn merge_level_in_parallel(
 
     progress.region("merging");
     let queue = std::sync::Mutex::new(work.into_iter());
-    let (send, receive) = std::sync::mpsc::sync_channel::<(Parent, lyv_rank::Worst)>(workers * 4);
+    type Merged = (Parent, lyv_rank::Worst, Option<u32>);
+    let (send, receive) = std::sync::mpsc::sync_channel::<Merged>(workers * 4);
 
     let mut parents = Vec::new();
     let mut worst = lyv_rank::Worst::default();
+    let mut fits: Option<u32> = None;
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let send = send.clone();
@@ -1629,6 +1650,12 @@ fn merge_level_in_parallel(
                     let encoded =
                         lyv_mvt::encode_chains(&options.output_layer, parent_extent, &chains);
                     let weight = weigh(&chains, &encoded, ranks);
+                    // Only a tile that's over has a cutoff to find.
+                    let cutoff = if options.limits.overflow(weight) > 1.0 {
+                        tile_cutoff(&chains, Some(encoded.len()), ranks, options.limits)
+                    } else {
+                        None
+                    };
                     progress.item();
                     if send
                         .send((
@@ -1638,6 +1665,7 @@ fn merge_level_in_parallel(
                                 encoded,
                             },
                             weight,
+                            cutoff,
                         ))
                         .is_err()
                     {
@@ -1649,16 +1677,61 @@ fn merge_level_in_parallel(
         // Dropped so the loop below ends with the last worker.
         drop(send);
 
-        for (parent, weight) in receive {
-            // A maximum, so arrival order can't change it.
+        for (parent, weight, cutoff) in receive {
+            // A maximum and a minimum, so arrival order can't change them.
             worst = worst.max(weight);
+            fits = match (fits, cutoff) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             parents.push(parent);
         }
     });
 
     // Sorted, so the result doesn't depend on thread completion order.
     parents.sort_unstable_by_key(|parent| parent.coord);
-    (parents, worst)
+    (parents, worst, fits)
+}
+
+/// The cutoff that fits every tile: the least of the tiles' own, and never
+/// above `cutoff`, since a longer prefix would bring back features a deeper
+/// zoom dropped.
+fn level_cutoff(tiles: impl Iterator<Item = Option<u32>>, cutoff: u32) -> u32 {
+    tiles.flatten().fold(cutoff, u32::min)
+}
+
+/// The ranking cutoff one tile needs to fit `limits`, or `None` if it does.
+///
+/// Each feature is priced as its attributes plus its geometry's estimate
+/// ([`lyv_mvt::geometry_cost`]). Given the tile's encoded size, the estimates
+/// are scaled to sum to it. A feature the ranking never saw is never thinned
+/// (see the climb), so it's a cost the tile pays regardless.
+fn tile_cutoff(
+    chains: &[lyv_core::Chain],
+    encoded: Option<usize>,
+    ranks: &lyv_core::PerFeature<(u32, u32)>,
+    limits: lyv_rank::Limits,
+) -> Option<u32> {
+    let mut geometry: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for chain in chains {
+        *geometry.entry(chain.feature).or_default() +=
+            lyv_mvt::geometry_cost(std::slice::from_ref(chain));
+    }
+    let estimated: usize = geometry.values().sum();
+    let scale = match encoded {
+        Some(bytes) if estimated > 0 => bytes as f64 / estimated as f64,
+        _ => 1.0,
+    };
+    let mut fixed = 0;
+    let mut features = Vec::with_capacity(geometry.len());
+    for (id, cost) in geometry {
+        let cost = (cost as f64 * scale).round() as usize;
+        match ranks.get(id) {
+            Some((rank, attributes)) => features.push((rank, cost + attributes as usize)),
+            None => fixed += cost,
+        }
+    }
+    lyv_rank::fitting_cutoff(&mut features, fixed, limits)
 }
 
 /// Add each tile's margin and write it straight into the archive.
@@ -2720,6 +2793,7 @@ mod tests {
             dust: true,
             threads: 1,
             keep_store: false,
+            delete_input: false,
             mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
             limits: Limits {
                 bytes: 0,

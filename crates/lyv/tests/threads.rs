@@ -93,12 +93,13 @@ fn build_from(threads: usize, body: String) -> Built {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         // A real buffer, so the nine-tile read happens.
         buffer: 64,
         keep_store: false,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         simplification: lyv_simplify::Tolerance::Distance(1.0),
     };

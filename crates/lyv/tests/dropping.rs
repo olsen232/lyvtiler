@@ -79,6 +79,7 @@ fn build_scaled(across: i64, limits: Limits, maxzoom_limit_scale: f64) -> Built 
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         limits,
         maxzoom_limit_scale,

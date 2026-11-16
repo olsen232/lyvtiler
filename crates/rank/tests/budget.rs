@@ -1,10 +1,10 @@
 //! Turning a level's measurements into a keep-count.
 //!
-//! Narrow the keep-count by how far the worst tile is over the limits. Each
-//! level feeds the one above, so the factors compound without reasoning about
-//! zoom.
+//! How far the worst tile is over the limits says whether a level is thinned;
+//! each tile's own cutoff says how far. Each level feeds the one above, so the
+//! cuts compound without reasoning about zoom.
 
-use lyv_rank::{Limits, Worst, narrow};
+use lyv_rank::{Limits, Worst, fitting_cutoff};
 
 const LIMITS: Limits = Limits {
     bytes: 500_000,
@@ -18,18 +18,20 @@ fn a_level_that_fits_is_left_alone() {
         features: 1_000,
     };
     assert_eq!(LIMITS.overflow(worst), 1.0);
-    assert_eq!(narrow(50_000, 1.0), 50_000);
+    let mut features = [(3, 400_000), (1, 0)];
+    assert_eq!(fitting_cutoff(&mut features, 0, LIMITS), None);
 }
 
 #[test]
-fn a_level_four_times_over_keeps_a_quarter() {
-    // The whole rule: keep 1/overflow.
+fn a_tile_four_times_over_keeps_what_fits_in_rank_order() {
     let worst = Worst {
         bytes: 2_000_000,
-        features: 1_000,
+        features: 4,
     };
     assert_eq!(LIMITS.overflow(worst), 4.0);
-    assert_eq!(narrow(40_000, 4.0), 10_000);
+    // Ranks 0 and 1 fill the budget; rank 2 would break it.
+    let mut features = [(2, 500_000), (0, 250_000), (3, 1_000_000), (1, 250_000)];
+    assert_eq!(fitting_cutoff(&mut features, 0, LIMITS), Some(2));
 }
 
 #[test]
@@ -50,22 +52,11 @@ fn whichever_limit_is_worse_decides() {
 }
 
 #[test]
-fn narrowing_never_widens() {
-    // Or a feature dropped at one zoom would reappear at a shallower one.
-    assert_eq!(
-        narrow(1_000, 0.5),
-        1_000,
-        "an under-full level must not grow"
-    );
-    assert_eq!(narrow(1_000, 0.0), 1_000);
-}
-
-#[test]
 fn something_always_survives() {
     // One feature can be over the limit alone, like a coastline at z0. A
     // too-detailed tile beats a blank one.
-    assert_eq!(narrow(10, 1_000_000.0), 1);
-    assert_eq!(narrow(1, 2.0), 1);
+    let mut features = [(5, 1_000_000_000)];
+    assert_eq!(fitting_cutoff(&mut features, 0, LIMITS), Some(6));
 }
 
 #[test]

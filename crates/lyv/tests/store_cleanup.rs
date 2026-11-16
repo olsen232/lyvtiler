@@ -46,11 +46,12 @@ fn job(max_zoom: u32, keep_store: bool) -> Job {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         buffer: 0,
         keep_store,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         simplification: lyv_simplify::Tolerance::Distance(1.0),
     };
@@ -122,4 +123,16 @@ fn a_second_run_after_a_clean_finish_does_not_trip_on_the_old_parameters() {
     let mut deeper = job.options.clone();
     deeper.max_zoom = Some(5);
     run(&deeper).expect("a deeper rebuild should just work once the store is gone");
+}
+
+#[test]
+fn the_input_can_be_deleted_once_read() {
+    let mut job = job(3, false);
+    job.options.delete_input = true;
+    run(&job.options).unwrap();
+    assert!(!job.options.input.exists(), "the input should be gone");
+    assert!(
+        job.options.output.exists(),
+        "the archive should still be written"
+    );
 }

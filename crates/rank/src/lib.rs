@@ -290,24 +290,28 @@ impl Limits {
     }
 }
 
-/// Narrow a keep-count by an overflow factor: four times over keeps a quarter.
+/// The longest prefix of the ranking one tile can hold: the cutoff below
+/// which its features fit `limits`, or `None` if they all do.
 ///
-/// Never widens — a longer prefix would bring back features a deeper zoom
-/// dropped. Never reaches zero — one feature can exceed a limit by itself, and
-/// a blank tile is worse than a heavy one.
-///
-/// It under-corrects, because the ranking keeps large features and drops cheap
-/// ones; the next level up measures the result and corrects from there.
-pub fn narrow(cutoff: u32, overflow: f64) -> u32 {
-    // Written so a NaN overflow means no narrowing.
-    if !matches!(
-        overflow.partial_cmp(&1.0),
-        Some(std::cmp::Ordering::Greater)
-    ) {
-        return cutoff;
+/// `features` is each of the tile's features as (rank, bytes), in any order;
+/// `fixed` is bytes the tile pays whatever is kept. The level's cutoff is the
+/// least of its tiles', which fits every tile at once in a single pass.
+/// Dividing the keep-count by the worst tile's overflow, as before, cut too
+/// deep when only a few tiles were over (z15 of a 59.9M-feature layer: 4.2x
+/// over, cut to 14.4M where 39.7M had fit). Never below the tile's first feature: a blank tile
+/// is worse than a heavy one.
+pub fn fitting_cutoff(features: &mut [(u32, usize)], fixed: usize, limits: Limits) -> Option<u32> {
+    features.sort_unstable();
+    let mut bytes = fixed;
+    for (count, &(rank, cost)) in features.iter().enumerate() {
+        bytes += cost;
+        let over = (limits.features != 0 && count + 1 > limits.features)
+            || (limits.bytes != 0 && bytes > limits.bytes);
+        if over {
+            return Some(if count == 0 { rank + 1 } else { rank });
+        }
     }
-    let kept = (f64::from(cutoff) / overflow).floor();
-    (kept as u32).max(1)
+    None
 }
 
 /// Produces a total order over a layer's features.
@@ -479,6 +483,26 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn a_tile_keeps_the_longest_prefix_that_fits() {
+        let limits = Limits {
+            bytes: 100,
+            features: 3,
+        };
+        // Four features against three: the fourth by rank goes.
+        let mut four = [(40, 1), (10, 1), (30, 1), (20, 1)];
+        assert_eq!(fitting_cutoff(&mut four, 0, limits), Some(40));
+        // Bytes bind first: 50 fixed, then 30 + 30 is over at rank 20.
+        let mut heavy = [(20, 30), (10, 30)];
+        assert_eq!(fitting_cutoff(&mut heavy, 50, limits), Some(20));
+        // Everything fits.
+        let mut light = [(5, 10), (6, 10)];
+        assert_eq!(fitting_cutoff(&mut light, 0, limits), None);
+        // One feature over on its own is still kept.
+        let mut huge = [(7, 500), (9, 1)];
+        assert_eq!(fitting_cutoff(&mut huge, 0, limits), Some(8));
     }
 
     #[test]

@@ -63,6 +63,7 @@ fn build(extension: &str, write_input: impl FnOnce(&Path)) -> Built {
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         limits: Limits {
             bytes: 0,

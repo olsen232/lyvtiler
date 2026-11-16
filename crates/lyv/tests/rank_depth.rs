@@ -68,11 +68,12 @@ fn build(rank_depth: u32, limits: Limits) -> Built {
         dust: true,
         threads: 1,
         limits,
-        // No vertex budget: these tests vary the feature budget.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget: these tests vary the feature budget.
         max_tile_vertices: 0,
         buffer: 0,
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         simplification: lyv_simplify::Tolerance::Distance(1.0),
     };

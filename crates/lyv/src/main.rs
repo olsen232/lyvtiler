@@ -298,6 +298,12 @@ struct Cli {
     #[arg(long)]
     keep_store: bool,
 
+    /// Delete the input file once it has been read, before ranking and
+    /// encoding, to free its disk space. The input is gone even if lyv fails
+    /// later.
+    #[arg(long)]
+    delete_input: bool,
+
     /// How much of the intermediate store to memory-map.
     ///
     /// Turning on mapped pages can quickly use a lot of memory, since each
@@ -583,6 +589,7 @@ fn main() -> Result<()> {
         rank_depth: cli.rank_depth,
         dust: !cli.no_dust,
         keep_store: cli.keep_store,
+        delete_input: cli.delete_input,
         // Decimal GB. Non-negative, checked above.
         mmap_bytes: (cli.mmap * 1e9) as u64,
         threads: cli.threads,

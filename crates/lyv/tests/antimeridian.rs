@@ -58,14 +58,15 @@ fn build(max_zoom: u32, buffer: u32) -> Built {
         threads: 1,
         // Kept, since these tests read the store.
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No limits: these tests check exact geometry.
         limits: lyv::Limits {
             bytes: 0,
             features: 0,
         },
-        // No vertex budget, which would coarsen the geometry.
         maxzoom_limit_scale: 1.0,
+        // No vertex budget, which would coarsen the geometry.
         max_tile_vertices: 0,
         buffer,
         simplification: lyv_simplify::Tolerance::NONE,

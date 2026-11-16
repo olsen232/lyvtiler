@@ -116,6 +116,7 @@ fn build() -> Built {
         max_tile_vertices: 0,
         buffer: 0,
         keep_store: true,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // Off: the fault is in cutting and closing. On, a tuning change could
         // move the fixture.

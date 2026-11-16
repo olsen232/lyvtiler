@@ -32,6 +32,7 @@ fn options(dir: &tempfile::TempDir, source: &str, max_zoom: u32) -> Options {
         dust: true,
         threads: 1,
         keep_store: false,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         // No limits: these tests count what arrives.
         limits: lyv::Limits {

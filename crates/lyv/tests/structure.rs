@@ -29,6 +29,7 @@ fn options(dir: &tempfile::TempDir, source: &str, max_zoom: Option<u32>) -> lyv:
         dust: true,
         threads: 1,
         keep_store: false,
+        delete_input: false,
         mmap_bytes: lyv_store::DEFAULT_MMAP_BYTES,
         limits: lyv::Limits {
             bytes: 0,
