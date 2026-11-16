@@ -96,6 +96,24 @@ impl<T: Copy + Default> PerFeature<T> {
         }
     }
 
+    /// An empty one over the same ids as this, already sized: for filling in
+    /// an order other than by id. Filled that way from empty, the first id
+    /// inserted becomes the base, the first lower one sends everything to a
+    /// map, and ranking 59.9M features held 3 GB of map instead of 0.25 GB.
+    pub fn same_span<U: Copy + Default>(&self) -> PerFeature<U> {
+        match &self.repr {
+            Repr::Dense { base, values, .. } if !values.is_empty() => PerFeature {
+                repr: Repr::Dense {
+                    base: *base,
+                    values: vec![U::default(); values.len()],
+                    present: vec![0; values.len() / 64 + 1],
+                },
+                len: 0,
+            },
+            _ => PerFeature::new(),
+        }
+    }
+
     /// Whether `id` belongs in the array: at or past its base, and not so far
     /// past what's held that the gap would cost more than a map. An empty
     /// array takes `id` as its base.
@@ -106,7 +124,10 @@ impl<T: Copy + Default> PerFeature<T> {
                     *base = id;
                     return true;
                 }
-                id >= *base && id - *base <= 4 * self.len as u64 + SPARSE_SLACK
+                // Inside the array already allocated, or not too far past it.
+                id >= *base
+                    && (id - *base < values.len() as u64
+                        || id - *base <= 4 * self.len as u64 + SPARSE_SLACK)
             }
             Repr::Sparse(_) => true,
         }
@@ -293,6 +314,27 @@ mod tests {
         assert_eq!(
             whole.iter().map(|(id, _)| id).collect::<Vec<_>>(),
             (100..120).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_same_span_stays_dense_whatever_the_order() {
+        let mut sizes = PerFeature::new();
+        for id in 10u64..1_000_010 {
+            sizes.insert(id, 1u8);
+        }
+        let mut ranks: PerFeature<u32> = sizes.same_span();
+        assert!(ranks.is_empty());
+        for (rank, id) in [500_000u64, 10, 1_000_009, 20].into_iter().enumerate() {
+            ranks.insert(id, rank as u32);
+        }
+        assert!(ranks.is_dense());
+        assert_eq!(ranks.len(), 4);
+        assert_eq!(ranks.get(10), Some(1));
+        assert_eq!(ranks.get(11), None);
+        assert_eq!(
+            ranks.ids().collect::<Vec<_>>(),
+            vec![10, 20, 500_000, 1_000_009]
         );
     }
 

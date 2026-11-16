@@ -167,7 +167,8 @@ impl Layer {
     /// doesn't reorder the rest.
     fn draw_buckets(&mut self) -> Vec<usize> {
         self.settle();
-        let mut starts = Vec::new();
+        // Sized once: pushing doubles, and the copy is held while it moves.
+        let mut starts = Vec::with_capacity(self.tiles() + 1);
         let mut ids = Vec::new();
         let mut at = 0;
         for run in self.entries.chunk_by_mut(|a, b| a.0 == b.0) {
@@ -181,7 +182,6 @@ impl Layer {
             }
         }
         starts.push(at);
-        starts.shrink_to_fit();
         starts
     }
 
@@ -331,7 +331,8 @@ impl Ranker for Evenstar {
         // another tile are skipped, so every round takes one new feature per
         // tile. A run is a few ids, so its offset fits in 32 bits.
         let mut cursor = vec![0u32; tiles];
-        let mut ranks = PerFeature::new();
+        // Ranked in tile order, not id order: see `same_span`.
+        let mut ranks = layer.sizes.same_span();
         let mut next = 0u32;
 
         let mut emitted = true;
@@ -373,10 +374,11 @@ impl Ranker for ByArea {
                 .total_cmp(&layer.order_of(*a))
                 .then(scramble(*b).cmp(&scramble(*a)))
         });
-        ids.into_iter()
-            .enumerate()
-            .map(|(rank, id)| (id, rank as u32))
-            .collect()
+        let mut ranks = layer.sizes.same_span();
+        for (rank, id) in ids.into_iter().enumerate() {
+            ranks.insert(id, rank as u32);
+        }
+        ranks
     }
 }
 
