@@ -155,9 +155,7 @@ pub fn of_pieces(pieces: &lyv_core::Pieces) -> Item {
 /// stays here.
 pub fn of_layer(layer: &lyv_rank::Layer) -> Item {
     let (buckets, ids, id_capacity, sizes, size_bytes) = layer.footprint();
-    let bytes = btree_map_bytes::<lyv_core::TileCoord, Vec<u64>>(buckets)
-        + vec_bytes::<u64>(id_capacity)
-        + size_bytes;
+    let bytes = vec_bytes::<(u64, u64)>(id_capacity) + size_bytes;
     Item::new(
         "layer",
         bytes,

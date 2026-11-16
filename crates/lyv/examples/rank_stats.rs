@@ -91,7 +91,7 @@ fn main() -> Result<()> {
         Box::new(Evenstar) as Box<dyn Ranker>,
         Box::new(ByArea) as Box<dyn Ranker>,
     ] {
-        let ranks = ranker.rank(&layer);
+        let ranks = ranker.rank(layer.clone());
         println!("\n{}", ranker.name());
         println!(
             "{:>10}  {:>12}  {:>14}  {:>16}  {:>12}",

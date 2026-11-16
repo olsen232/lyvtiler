@@ -2296,9 +2296,8 @@ fn store_ranks(
     progress.stage("ranking", Some("features"));
     progress.expect(layer.features() as u64);
     let tiles = layer.tiles();
-    let ranks = ranker.rank(&layer);
-    // The buckets were only for drawing; they go before the listing is built.
-    drop(layer);
+    // Taken: the ranking draws the buckets in place, and they go with it.
+    let ranks = ranker.rank(layer);
     // In id order: inserts walk the primary key, and the stored ranking is
     // identical between runs.
     let listed: Vec<(u64, u32, u32)> = ranks

@@ -31,7 +31,7 @@ fn spread(tiles: u32, per_tile: u64) -> Layer {
 fn every_feature_is_ranked_exactly_once() {
     for ranker in rankers() {
         let layer = spread(5, 4);
-        let ranks = ranker.rank(&layer);
+        let ranks = ranker.rank(layer.clone());
         assert_eq!(
             ranks.len(),
             20,
@@ -60,7 +60,7 @@ fn a_feature_in_several_tiles_is_ranked_once_not_once_per_tile() {
             layer.add(tile(t, 0), 7, Size::polygon(100.0));
             layer.add(tile(t, 0), u64::from(t) + 10, Size::polygon(1.0));
         }
-        let ranks = ranker.rank(&layer);
+        let ranks = ranker.rank(layer.clone());
         assert_eq!(
             ranks.len(),
             5,
@@ -76,8 +76,8 @@ fn ranking_is_deterministic() {
     for ranker in rankers() {
         let layer = spread(9, 3);
         assert_eq!(
-            ranker.rank(&layer),
-            ranker.rank(&layer),
+            ranker.rank(layer.clone()),
+            ranker.rank(layer.clone()),
             "{} is not deterministic",
             ranker.name()
         );
@@ -87,7 +87,7 @@ fn ranking_is_deterministic() {
 #[test]
 fn an_empty_layer_ranks_nothing() {
     for ranker in rankers() {
-        assert!(ranker.rank(&Layer::default()).is_empty());
+        assert!(ranker.rank(Layer::default()).is_empty());
     }
 }
 
@@ -103,7 +103,7 @@ fn evenstar_takes_one_feature_from_every_tile_before_any_tile_gets_two() {
         layer.add(tile(t, 0), u64::from(t) + 100, Size::polygon(1.0));
     }
 
-    let ranks = Evenstar.rank(&layer);
+    let ranks = Evenstar.rank(layer.clone());
     let first_round: Vec<u64> = (0..6)
         .map(|r| ranks.iter().find(|&(_, v)| v == r).unwrap().0)
         .collect();
@@ -152,7 +152,7 @@ fn the_more_tiles_a_feature_spans_the_better_it_ranks() {
         wide.push((span, ids));
     }
 
-    let ranks = Evenstar.rank(&layer);
+    let ranks = Evenstar.rank(layer.clone());
     let means: Vec<(u32, f64)> = wide
         .iter()
         .map(|(span, ids)| {
@@ -185,7 +185,7 @@ fn head_share(tiles: u32, wanted: u64, contest: &[(u64, Size)]) -> f64 {
             layer.add(tile(t, 0), id + u64::from(t) * 10, *size);
         }
     }
-    let ranks = Evenstar.rank(&layer);
+    let ranks = Evenstar.rank(layer.clone());
 
     // The first `tiles` ranks are round one.
     let wins = (0..tiles)
@@ -265,7 +265,7 @@ fn the_tile_order_does_not_depend_on_which_other_tiles_exist() {
         for &t in tiles {
             layer.add(tile(t, 0), u64::from(t), Size::polygon(1.0));
         }
-        let ranks = Evenstar.rank(&layer);
+        let ranks = Evenstar.rank(layer.clone());
         let mut by_rank: Vec<(u32, u32)> = ranks.iter().map(|(id, r)| (r, id as u32)).collect();
         by_rank.sort_unstable();
         by_rank.into_iter().map(|(_, id)| id).collect()
@@ -327,8 +327,8 @@ mod merging {
         for name in lyv_rank::NAMES {
             let ranker = by_name(name).unwrap();
             assert_eq!(
-                ranker.rank(&whole),
-                ranker.rank(&merged),
+                ranker.rank(whole.clone()),
+                ranker.rank(merged.clone()),
                 "{name} disagreed between one piece and three shares"
             );
         }
@@ -344,7 +344,7 @@ mod merging {
                 populate(&mut part, share);
                 layer.merge(part);
             }
-            by_name("evenstar").unwrap().rank(&layer)
+            by_name("evenstar").unwrap().rank(layer.clone())
         };
         assert_eq!(
             build([0..20, 20..40, 40..60]),
@@ -357,8 +357,8 @@ mod merging {
         // Shares can be empty when there are fewer features than threads.
         let mut layer = Layer::default();
         populate(&mut layer, 0..10);
-        let before = by_name("evenstar").unwrap().rank(&layer);
+        let before = by_name("evenstar").unwrap().rank(layer.clone());
         layer.merge(Layer::default());
-        assert_eq!(by_name("evenstar").unwrap().rank(&layer), before);
+        assert_eq!(by_name("evenstar").unwrap().rank(layer.clone()), before);
     }
 }

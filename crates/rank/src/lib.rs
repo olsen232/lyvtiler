@@ -16,8 +16,6 @@
 //! the first round, a rank of about `(T+1)/(k+1)`. See §8 of the design notes
 //! and `docs/rank_sim.py`.
 
-use std::collections::BTreeMap;
-
 use lyv_core::{PerFeature, TileCoord};
 
 /// How big a feature is: area for polygons, length for lines, nothing for
@@ -77,60 +75,69 @@ impl Size {
 /// Which features are in which tile, and how big each is. Built during the
 /// cut; sizes are the whole feature's, not a clipped piece's, so a large
 /// polygon doesn't rank low in a tile that caught only its corner.
-#[derive(Default, Debug)]
+///
+/// One flat list of `(bucket, feature)` pairs rather than a list per bucket:
+/// the ranking grid is deeper than maxzoom, so 30.6M small features fill 41.9M
+/// buckets of about three ids each, and a `Vec` per bucket in a tree cost
+/// three times what the ids did.
+#[derive(Clone, Default, Debug)]
 pub struct Layer {
-    tiles: BTreeMap<TileCoord, Vec<u64>>,
+    /// Every pair the cut recorded, the bucket as the scramble of its key. The
+    /// scramble is a bijection, so sorting the pairs puts the buckets in
+    /// visiting order without ties, and [`unscramble`] gives the key back.
+    entries: Vec<(u64, u64)>,
+    /// Whether `entries` is sorted and free of repeats.
+    settled: bool,
     sizes: PerFeature<Size>,
 }
 
 impl Layer {
-    /// Record that `id` occupies `tile`. Repeats aren't filtered — a feature can
-    /// leave several pieces in a tile, and filtering here would be quadratic —
-    /// the sort in `draw` deduplicates.
+    /// Record that `id` occupies `tile`. Repeats aren't filtered as they
+    /// arrive — a feature can leave several pieces in a tile, and filtering
+    /// here would be quadratic — but when the pairs are settled.
     pub fn add(&mut self, tile: TileCoord, id: u64, size: Size) {
         self.sizes.insert(id, size);
-        self.tiles.entry(tile).or_default().push(id);
+        self.entries.push((scramble(key_of(&tile)), id));
+        self.settled = false;
     }
 
     /// Counts for the memory report (`lyv::footprint`): buckets, ids, id
     /// capacity, sizes, and the bytes the sizes take. Capacity above ids means
     /// [`shrink`](Self::shrink) was missed.
     pub fn footprint(&self) -> (usize, usize, usize, usize, usize) {
-        let ids = self.tiles.values().map(Vec::len).sum();
-        let capacity = self.tiles.values().map(Vec::capacity).sum();
         (
-            self.tiles.len(),
-            ids,
-            capacity,
+            self.tiles(),
+            self.entries.len(),
+            self.entries.capacity(),
             self.sizes.len(),
             self.sizes.bytes(),
         )
     }
 
-    /// Hand back the capacity the buckets grew into (about 1.36× by doubling),
-    /// once nothing more will be added. It's held until ranking, which can be
+    /// Once nothing more will be added: sort the pairs, drop repeats, and hand
+    /// back the capacity they grew into. It's held until ranking, which can be
     /// the run's peak.
     pub fn shrink(&mut self) {
-        for ids in self.tiles.values_mut() {
-            ids.shrink_to_fit();
-        }
+        self.settle();
+        self.entries.shrink_to_fit();
         self.sizes.shrink();
     }
 
-    /// Absorb another layer's buckets, for building a layer across threads.
-    /// Order doesn't matter: `draw` sorts and deduplicates each tile's list.
+    fn settle(&mut self) {
+        if !self.settled {
+            self.entries.sort_unstable();
+            self.entries.dedup();
+            self.settled = true;
+        }
+    }
+
+    /// Absorb another layer's pairs, for building a layer across threads.
+    /// Order doesn't matter: settling sorts them.
     pub fn merge(&mut self, other: Layer) {
         self.sizes.extend(other.sizes);
-        for (tile, ids) in other.tiles {
-            match self.tiles.entry(tile) {
-                std::collections::btree_map::Entry::Occupied(mut held) => {
-                    held.get_mut().extend(ids);
-                }
-                // Moved, not copied: most tiles are touched by one share.
-                std::collections::btree_map::Entry::Vacant(empty) => {
-                    empty.insert(ids);
-                }
-            }
+        if !other.entries.is_empty() {
+            self.entries.extend(other.entries);
+            self.settled = false;
         }
     }
 
@@ -138,68 +145,44 @@ impl Layer {
         self.sizes.len()
     }
 
+    /// How many buckets hold a feature.
     pub fn tiles(&self) -> usize {
-        self.tiles.len()
+        if self.settled {
+            self.entries.chunk_by(|a, b| a.0 == b.0).count()
+        } else {
+            self.entries
+                .iter()
+                .map(|(bucket, _)| *bucket)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        }
     }
 
-    /// Each tile's features in drawn order, the tiles in visiting order.
-    /// Shared by every ranker.
-    fn sorted_tiles(&self) -> Vec<Vec<u64>> {
-        let mut order: Vec<(&TileCoord, &Vec<u64>)> = self.tiles.iter().collect();
-        // Ordered by a hash of the coordinate, not a shuffle, so a tile's
-        // position doesn't depend on which other tiles exist: adding one
-        // doesn't reorder the rest.
-        order.sort_by_key(|(coord, _)| scramble(key_of(coord)));
-
-        order
-            .into_iter()
-            .map(|(coord, ids)| self.draw(key_of(coord), ids))
-            .collect()
-    }
-
-    /// Order one tile's features by a lottery weighted to the large ones.
+    /// Draw every bucket in place: afterwards each bucket's run of pairs holds
+    /// its features in drawn order, and the runs are in visiting order. Returns
+    /// where each run starts, with the end of the last appended.
     ///
-    /// A sort would make the largest feature certain to survive and the
-    /// smallest certain not to; a neighbourhood of small things sharing a tile
-    /// with something big would be wiped. The draw gives each a chance in
-    /// proportion to its weight.
-    ///
-    /// The exponential race: key `E / w`, `E` from the unit exponential, taken
-    /// ascending, gives `P(first) = w / Σw` at every place (Efraimidis and
-    /// Spirakis, 2006). Each tile draws independently, so a feature in ten tiles
-    /// gets ten chances — which is how evenstar keeps preferring big features.
-    fn draw(&self, tile: u64, ids: &[u64]) -> Vec<u64> {
-        let mut ids = ids.to_vec();
-        ids.sort_unstable();
-        ids.dedup();
-
-        // One queue per kind, interleaved below.
-        let mut tiers: [Vec<(f64, u64)>; TIERS] = Default::default();
-        for id in ids {
-            let size = self.sizes.get(id).unwrap_or_else(Size::point);
-            let key = exponential(tile, id) / size.weight();
-            tiers[size.tier()].push((key, id));
+    /// Ordered by a hash of the coordinate, not a shuffle, so a bucket's
+    /// position doesn't depend on which other buckets exist: adding one
+    /// doesn't reorder the rest.
+    fn draw_buckets(&mut self) -> Vec<usize> {
+        self.settle();
+        let mut starts = Vec::new();
+        let mut ids = Vec::new();
+        let mut at = 0;
+        for run in self.entries.chunk_by_mut(|a, b| a.0 == b.0) {
+            starts.push(at);
+            at += run.len();
+            ids.clear();
+            ids.extend(run.iter().map(|(_, id)| *id));
+            let drawn = draw(&self.sizes, unscramble(run[0].0), &ids);
+            for (slot, id) in run.iter_mut().zip(drawn) {
+                slot.1 = id;
+            }
         }
-        for tier in tiers.iter_mut() {
-            // Reversed so the smallest key, the race's winner, pops first.
-            tier.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            tier.reverse();
-        }
-
-        let mut out = Vec::with_capacity(tiers.iter().map(Vec::len).sum());
-        for step in 0.. {
-            let live: Vec<usize> = (0..TIERS).filter(|&i| !tiers[i].is_empty()).collect();
-            let Some(&pick) = live.first() else { break };
-            // Uniformly among the kinds still holding anything. Mixed-kind
-            // layers are rare.
-            let pick = if live.len() == 1 {
-                pick
-            } else {
-                live[(scramble(tile ^ scramble(step)) % live.len() as u64) as usize]
-            };
-            out.push(tiers[pick].pop().expect("picked a non-empty tier").1);
-        }
-        out
+        starts.push(at);
+        starts.shrink_to_fit();
+        starts
     }
 
     /// The size as one number. Works because the tiers never overlap.
@@ -211,6 +194,48 @@ impl Layer {
             None => f64::NEG_INFINITY,
         }
     }
+}
+
+/// Order one tile's features — sorted, without repeats — by a lottery
+/// weighted to the large ones.
+///
+/// A sort would make the largest feature certain to survive and the
+/// smallest certain not to; a neighbourhood of small things sharing a tile
+/// with something big would be wiped. The draw gives each a chance in
+/// proportion to its weight.
+///
+/// The exponential race: key `E / w`, `E` from the unit exponential, taken
+/// ascending, gives `P(first) = w / Σw` at every place (Efraimidis and
+/// Spirakis, 2006). Each tile draws independently, so a feature in ten tiles
+/// gets ten chances — which is how evenstar keeps preferring big features.
+fn draw(sizes: &PerFeature<Size>, tile: u64, ids: &[u64]) -> Vec<u64> {
+    // One queue per kind, interleaved below.
+    let mut tiers: [Vec<(f64, u64)>; TIERS] = Default::default();
+    for &id in ids {
+        let size = sizes.get(id).unwrap_or_else(Size::point);
+        let key = exponential(tile, id) / size.weight();
+        tiers[size.tier()].push((key, id));
+    }
+    for tier in tiers.iter_mut() {
+        // Reversed so the smallest key, the race's winner, pops first.
+        tier.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        tier.reverse();
+    }
+
+    let mut out = Vec::with_capacity(tiers.iter().map(Vec::len).sum());
+    for step in 0.. {
+        let live: Vec<usize> = (0..TIERS).filter(|&i| !tiers[i].is_empty()).collect();
+        let Some(&pick) = live.first() else { break };
+        // Uniformly among the kinds still holding anything. Mixed-kind
+        // layers are rare.
+        let pick = if live.len() == 1 {
+            pick
+        } else {
+            live[(scramble(tile ^ scramble(step)) % live.len() as u64) as usize]
+        };
+        out.push(tiers[pick].pop().expect("picked a non-empty tier").1);
+    }
+    out
 }
 
 /// What a single tile is allowed to be. Zero means no limit.
@@ -282,8 +307,8 @@ pub trait Ranker {
     fn name(&self) -> &'static str;
 
     /// Rank every feature, `0` most important: dense, each feature exactly once,
-    /// ranks `0..n`.
-    fn rank(&self, layer: &Layer) -> PerFeature<u32>;
+    /// ranks `0..n`. Takes the layer, since drawing reorders it in place.
+    fn rank(&self, layer: Layer) -> PerFeature<u32>;
 }
 
 /// One feature from every tile, then one more from every tile, and so on. The
@@ -299,26 +324,31 @@ impl Ranker for Evenstar {
         "evenstar"
     }
 
-    fn rank(&self, layer: &Layer) -> PerFeature<u32> {
-        let tiles = layer.sorted_tiles();
-        // Where each tile has got to. Features already ranked from another tile
-        // are skipped, so every round takes one new feature per tile.
-        let mut cursor = vec![0usize; tiles.len()];
+    fn rank(&self, mut layer: Layer) -> PerFeature<u32> {
+        let starts = layer.draw_buckets();
+        let tiles = starts.len() - 1;
+        // How far into its run each tile has got. Features already ranked from
+        // another tile are skipped, so every round takes one new feature per
+        // tile. A run is a few ids, so its offset fits in 32 bits.
+        let mut cursor = vec![0u32; tiles];
         let mut ranks = PerFeature::new();
         let mut next = 0u32;
 
         let mut emitted = true;
         while emitted {
             emitted = false;
-            for (index, ids) in tiles.iter().enumerate() {
-                while cursor[index] < ids.len() && ranks.contains(ids[cursor[index]]) {
-                    cursor[index] += 1;
+            for index in 0..tiles {
+                let run = &layer.entries[starts[index]..starts[index + 1]];
+                let mut at = cursor[index] as usize;
+                while at < run.len() && ranks.contains(run[at].1) {
+                    at += 1;
                 }
-                if cursor[index] < ids.len() {
-                    ranks.insert(ids[cursor[index]], next);
+                if at < run.len() {
+                    ranks.insert(run[at].1, next);
                     next += 1;
                     emitted = true;
                 }
+                cursor[index] = at as u32;
             }
         }
         ranks
@@ -335,7 +365,7 @@ impl Ranker for ByArea {
         "by-area"
     }
 
-    fn rank(&self, layer: &Layer) -> PerFeature<u32> {
+    fn rank(&self, layer: Layer) -> PerFeature<u32> {
         let mut ids: Vec<u64> = layer.sizes.ids().collect();
         ids.sort_by(|a, b| {
             layer
@@ -377,6 +407,17 @@ fn exponential(tile: u64, id: u64) -> f64 {
     -uniform.ln()
 }
 
+/// The inverse of [`scramble`], which is a bijection: each step undone, last
+/// first. The multipliers are the inverses of `scramble`'s, mod 2^64.
+fn unscramble(value: u64) -> u64 {
+    let mut z = value ^ (value >> 31) ^ (value >> 62);
+    z = z.wrapping_mul(0x3196_42B2_D24D_8EC3);
+    z = z ^ (z >> 27) ^ (z >> 54);
+    z = z.wrapping_mul(0x96DE_1B17_3F11_9089);
+    z = z ^ (z >> 30) ^ (z >> 60);
+    z.wrapping_sub(0x9E37_79B9_7F4A_7C15)
+}
+
 /// SplitMix64's finalizer. Not a hashmap hasher, because its output decides
 /// what survives and must be the same across runs, machines and versions.
 fn scramble(value: u64) -> u64 {
@@ -396,6 +437,23 @@ mod tests {
         // tileset.
         assert_eq!(scramble(0), 16_294_208_416_658_607_535);
         assert_eq!(scramble(1), 10_451_216_379_200_822_465);
+    }
+
+    #[test]
+    fn unscrambling_gives_back_what_was_scrambled() {
+        for value in [
+            0,
+            1,
+            42,
+            u64::MAX,
+            key_of(&TileCoord {
+                z: 17,
+                x: 70_000,
+                y: 81_234,
+            }),
+        ] {
+            assert_eq!(unscramble(scramble(value)), value);
+        }
     }
 
     #[test]
