@@ -16,15 +16,15 @@
 //! the first round, a rank of about `(T+1)/(k+1)`. See §8 of the design notes
 //! and `docs/rank_sim.py`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use lyv_core::TileCoord;
+use lyv_core::{PerFeature, TileCoord};
 
 /// How big a feature is: area for polygons, length for lines, nothing for
 /// points. The three kinds race separately, so an area is never compared with
 /// a length. Zero-area polygons are dropped at read time, so zero area means a
 /// line or a point.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Size {
     pub area: f64,
     pub length: f64,
@@ -80,7 +80,7 @@ impl Size {
 #[derive(Default, Debug)]
 pub struct Layer {
     tiles: BTreeMap<TileCoord, Vec<u64>>,
-    sizes: HashMap<u64, Size>,
+    sizes: PerFeature<Size>,
 }
 
 impl Layer {
@@ -93,12 +93,18 @@ impl Layer {
     }
 
     /// Counts for the memory report (`lyv::footprint`): buckets, ids, id
-    /// capacity and sizes. Capacity above ids means [`shrink`](Self::shrink)
-    /// was missed.
-    pub fn footprint(&self) -> (usize, usize, usize, usize) {
+    /// capacity, sizes, and the bytes the sizes take. Capacity above ids means
+    /// [`shrink`](Self::shrink) was missed.
+    pub fn footprint(&self) -> (usize, usize, usize, usize, usize) {
         let ids = self.tiles.values().map(Vec::len).sum();
         let capacity = self.tiles.values().map(Vec::capacity).sum();
-        (self.tiles.len(), ids, capacity, self.sizes.capacity())
+        (
+            self.tiles.len(),
+            ids,
+            capacity,
+            self.sizes.len(),
+            self.sizes.bytes(),
+        )
     }
 
     /// Hand back the capacity the buckets grew into (about 1.36× by doubling),
@@ -108,7 +114,7 @@ impl Layer {
         for ids in self.tiles.values_mut() {
             ids.shrink_to_fit();
         }
-        self.sizes.shrink_to_fit();
+        self.sizes.shrink();
     }
 
     /// Absorb another layer's buckets, for building a layer across threads.
@@ -170,7 +176,7 @@ impl Layer {
         // One queue per kind, interleaved below.
         let mut tiers: [Vec<(f64, u64)>; TIERS] = Default::default();
         for id in ids {
-            let size = self.sizes.get(&id).copied().unwrap_or_else(Size::point);
+            let size = self.sizes.get(id).unwrap_or_else(Size::point);
             let key = exponential(tile, id) / size.weight();
             tiers[size.tier()].push((key, id));
         }
@@ -198,7 +204,7 @@ impl Layer {
 
     /// The size as one number. Works because the tiers never overlap.
     fn order_of(&self, id: u64) -> f64 {
-        match self.sizes.get(&id) {
+        match self.sizes.get(id) {
             Some(size) if size.area > 0.0 => size.area,
             // Lines below every polygon, points below every line.
             Some(size) => -1.0 / (1.0 + size.length),
@@ -277,7 +283,7 @@ pub trait Ranker {
 
     /// Rank every feature, `0` most important: dense, each feature exactly once,
     /// ranks `0..n`.
-    fn rank(&self, layer: &Layer) -> HashMap<u64, u32>;
+    fn rank(&self, layer: &Layer) -> PerFeature<u32>;
 }
 
 /// One feature from every tile, then one more from every tile, and so on. The
@@ -293,19 +299,19 @@ impl Ranker for Evenstar {
         "evenstar"
     }
 
-    fn rank(&self, layer: &Layer) -> HashMap<u64, u32> {
+    fn rank(&self, layer: &Layer) -> PerFeature<u32> {
         let tiles = layer.sorted_tiles();
         // Where each tile has got to. Features already ranked from another tile
         // are skipped, so every round takes one new feature per tile.
         let mut cursor = vec![0usize; tiles.len()];
-        let mut ranks = HashMap::with_capacity(layer.features());
+        let mut ranks = PerFeature::new();
         let mut next = 0u32;
 
         let mut emitted = true;
         while emitted {
             emitted = false;
             for (index, ids) in tiles.iter().enumerate() {
-                while cursor[index] < ids.len() && ranks.contains_key(&ids[cursor[index]]) {
+                while cursor[index] < ids.len() && ranks.contains(ids[cursor[index]]) {
                     cursor[index] += 1;
                 }
                 if cursor[index] < ids.len() {
@@ -329,8 +335,8 @@ impl Ranker for ByArea {
         "by-area"
     }
 
-    fn rank(&self, layer: &Layer) -> HashMap<u64, u32> {
-        let mut ids: Vec<u64> = layer.sizes.keys().copied().collect();
+    fn rank(&self, layer: &Layer) -> PerFeature<u32> {
+        let mut ids: Vec<u64> = layer.sizes.ids().collect();
         ids.sort_by(|a, b| {
             layer
                 .order_of(*b)

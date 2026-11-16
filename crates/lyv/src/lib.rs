@@ -256,7 +256,7 @@ pub fn ingest(
     let mut fields: std::collections::BTreeMap<String, lyv_archive::FieldType> =
         std::collections::BTreeMap::new();
     let mut extent_of_data: Option<Extent> = None;
-    let mut polygons: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut polygons: lyv_core::PerFeature<()> = lyv_core::PerFeature::new();
 
     let mut z = match options.max_zoom {
         Some(given) => given,
@@ -407,7 +407,7 @@ pub fn ingest(
             let chains = pieces.remove(&coord).expect("a tile listed a moment ago");
             let (rings, lines): (Vec<_>, Vec<_>) = chains
                 .into_iter()
-                .partition(|c| polygons.contains(&c.feature));
+                .partition(|c| polygons.contains(c.feature));
             if rings.is_empty() {
                 // Nothing to close; put the tile back as it was.
                 pieces.insert(coord, lines);
@@ -741,7 +741,7 @@ fn stream_pass(
     facts: &mut Facts,
     fields: &mut std::collections::BTreeMap<String, lyv_archive::FieldType>,
     extent_of_data: &mut Option<Extent>,
-    polygons: &mut std::collections::HashSet<u64>,
+    polygons: &mut lyv_core::PerFeature<()>,
     progress: &Progress,
 ) -> Result<Pass> {
     // Bounded by vertices, not features: polygons and parcels differ by three
@@ -836,7 +836,7 @@ fn stream_pass(
                             lyv_mvt::attribute_cost(&feature.properties) as u32,
                         );
                         if feature.kind == lyv_source::Kind::Rings {
-                            polygons.insert(feature.id);
+                            polygons.insert(feature.id, ());
                         }
                         if !feature.properties.is_empty() {
                             timed(
@@ -904,8 +904,8 @@ fn stream_pass(
     layer.shrink();
     covered.shrink_to_fit();
     if record {
-        facts.attr_bytes.shrink_to_fit();
-        polygons.shrink_to_fit();
+        facts.attr_bytes.shrink();
+        polygons.shrink();
     }
 
     // Everything this pass built is settled here: the moment to report what
@@ -916,7 +916,7 @@ fn stream_pass(
             vec![
                 footprint::of_pieces(&pieces),
                 footprint::of_layer(&layer),
-                footprint::of_facts(facts.attr_bytes.capacity()),
+                footprint::of_facts(&facts.attr_bytes),
             ],
         )
     {
@@ -1103,7 +1103,7 @@ fn store_level_in_parallel(
     pieces: Pieces,
     extent: u32,
     thinning: lyv_simplify::Tolerance,
-    attr_bytes: &std::collections::HashMap<u64, u32>,
+    attr_bytes: &lyv_core::PerFeature<u32>,
     workers: usize,
     progress: &Progress,
 ) -> Result<(lyv_rank::Worst, Pieces)> {
@@ -1190,7 +1190,7 @@ struct Facts {
     /// `lyv_rank::Layer`.)
     features: usize,
     /// Each feature's attribute cost in an encoded tile.
-    attr_bytes: std::collections::HashMap<u64, u32>,
+    attr_bytes: lyv_core::PerFeature<u32>,
 }
 
 /// A feature's projected geometry, kept between the read and the cut.
@@ -1267,17 +1267,14 @@ fn absorb(into: &mut Pieces, from: Pieces) {
 }
 
 /// The largest tile in a level, by each limit independently.
-fn worst_tile(
-    pieces: &Pieces,
-    attr_bytes: &std::collections::HashMap<u64, u32>,
-) -> lyv_rank::Worst {
+fn worst_tile(pieces: &Pieces, attr_bytes: &lyv_core::PerFeature<u32>) -> lyv_rank::Worst {
     let mut worst = lyv_rank::Worst::default();
     for chains in pieces.values() {
         let features: std::collections::HashSet<u64> =
             chains.iter().map(|chain| chain.feature).collect();
         let attributes: usize = features
             .iter()
-            .map(|id| attr_bytes.get(id).copied().unwrap_or(0) as usize)
+            .map(|id| attr_bytes.get(*id).unwrap_or(0) as usize)
             .sum();
         worst.bytes = worst.bytes.max(lyv_mvt::geometry_cost(chains) + attributes);
         worst.features = worst.features.max(features.len());
@@ -1380,8 +1377,8 @@ pub fn merge_up(
             progress.item();
             chains.retain(|chain| {
                 ranks
-                    .get(&chain.feature)
-                    .is_none_or(|(rank, _)| *rank < narrowed)
+                    .get(chain.feature)
+                    .is_none_or(|(rank, _)| rank < narrowed)
             });
             store.put(
                 *coord,
@@ -1450,8 +1447,8 @@ pub fn merge_up(
                     // A feature the ranking never saw shouldn't happen; keeping
                     // it is the safe way to be wrong.
                     ranks
-                        .get(&chain.feature)
-                        .is_none_or(|(rank, _)| *rank < narrowed)
+                        .get(chain.feature)
+                        .is_none_or(|(rank, _)| rank < narrowed)
                 });
                 parent.encoded =
                     lyv_mvt::encode_chains(&options.output_layer, parent_extent, &parent.chains);
@@ -1524,7 +1521,7 @@ fn merge_level_in_parallel(
     tolerance: lyv_simplify::Tolerance,
     child_extent: u32,
     parent_extent: u32,
-    ranks: &std::collections::HashMap<u64, (u32, u32)>,
+    ranks: &lyv_core::PerFeature<(u32, u32)>,
     workers: usize,
     progress: &Progress,
 ) -> (Vec<Parent>, lyv_rank::Worst) {
@@ -1719,21 +1716,22 @@ pub fn encode(
 /// their rows are a fraction of that. Decoding from memory costs little, and
 /// the encoder takes each value as decoded instead of copying it.
 ///
-/// Indexed by id, since ids are dense from zero: a `Vec` beats a hash map.
-/// Keys aren't stored: rows hold indices into the store's
+/// Indexed by id through [`lyv_core::PerFeature`]: an array when ids are dense,
+/// as Parquet's and FlatGeobuf's row numbers are, and a map when a GeoJSON's
+/// own ids aren't. Keys aren't stored: rows hold indices into the store's
 /// [`Schema`](lyv_store::Schema).
 #[derive(Default)]
 struct Loaded {
     schema: lyv_store::Schema,
     /// Every row, end to end.
     rows: Vec<u8>,
-    /// By feature id: start in `rows`, and length. `(0, 0)` for none.
-    spans: Vec<(u64, u32)>,
+    /// By feature id: start in `rows`, and length.
+    spans: lyv_core::PerFeature<(u64, u32)>,
 }
 
 impl lyv_core::Attributes for Loaded {
     fn for_each(&self, feature: u64, visit: &mut dyn FnMut(&str, lyv_core::Value)) {
-        let Some(&(start, len)) = self.spans.get(feature as usize) else {
+        let Some((start, len)) = self.spans.get(feature) else {
             return;
         };
         let row = &self.rows[start as usize..start as usize + len as usize];
@@ -1754,17 +1752,15 @@ fn load_attributes(store: &dyn TileStore) -> Result<Loaded> {
         ..Loaded::default()
     };
     store.for_each_feature(&mut |id, row| {
-        let id = id as usize;
-        if loaded.spans.len() <= id {
-            loaded.spans.resize(id + 1, (0, 0));
-        }
-        loaded.spans[id] = (loaded.rows.len() as u64, row.len() as u32);
+        loaded
+            .spans
+            .insert(id, (loaded.rows.len() as u64, row.len() as u32));
         loaded.rows.extend_from_slice(row);
         Ok(())
     })?;
     // Grown by doubling while reading, so up to half of it is spare.
     loaded.rows.shrink_to_fit();
-    loaded.spans.shrink_to_fit();
+    loaded.spans.shrink();
     Ok(loaded)
 }
 
@@ -2193,10 +2189,10 @@ fn size_of(feature: &lyv_source::SourceFeature) -> lyv_rank::Size {
 fn weigh(
     chains: &[lyv_core::Chain],
     encoded: &[u8],
-    ranks: &std::collections::HashMap<u64, (u32, u32)>,
+    ranks: &lyv_core::PerFeature<(u32, u32)>,
 ) -> lyv_rank::Worst {
     weigh_by(chains, encoded, &|id| {
-        ranks.get(&id).map_or(0, |(_, bytes)| *bytes as usize)
+        ranks.get(id).map_or(0, |(_, bytes)| bytes as usize)
     })
 }
 
@@ -2205,10 +2201,10 @@ fn weigh(
 fn weigh_with(
     chains: &[lyv_core::Chain],
     encoded: &[u8],
-    attr_bytes: &std::collections::HashMap<u64, u32>,
+    attr_bytes: &lyv_core::PerFeature<u32>,
 ) -> lyv_rank::Worst {
     weigh_by(chains, encoded, &|id| {
-        attr_bytes.get(&id).copied().unwrap_or(0) as usize
+        attr_bytes.get(id).unwrap_or(0) as usize
     })
 }
 
@@ -2271,8 +2267,8 @@ fn weigh_by(
 }
 
 /// Every feature's rank and attribute cost, held for the whole climb.
-fn load_ranks(store: &dyn TileStore) -> Result<std::collections::HashMap<u64, (u32, u32)>> {
-    let mut ranks = std::collections::HashMap::new();
+fn load_ranks(store: &dyn TileStore) -> Result<lyv_core::PerFeature<(u32, u32)>> {
+    let mut ranks = lyv_core::PerFeature::new();
     // Counts nothing: it's quick, and counting it spent a stage's share of the
     // bar on almost no time.
     timed(Spent::Ranks, 0, || {
@@ -2281,6 +2277,7 @@ fn load_ranks(store: &dyn TileStore) -> Result<std::collections::HashMap<u64, (u
             Ok(())
         })
     })?;
+    ranks.shrink();
     timings::moved(Spent::Ranks, ranks.len() * 16);
     Ok(ranks)
 }
@@ -2300,17 +2297,19 @@ fn store_ranks(
     progress.expect(layer.features() as u64);
     let tiles = layer.tiles();
     let ranks = ranker.rank(&layer);
-    // Sorted: inserts walk the primary key, and the stored ranking is identical
-    // between runs.
-    let mut listed: Vec<(u64, u32, u32)> = ranks
-        .into_iter()
+    // The buckets were only for drawing; they go before the listing is built.
+    drop(layer);
+    // In id order: inserts walk the primary key, and the stored ranking is
+    // identical between runs.
+    let listed: Vec<(u64, u32, u32)> = ranks
+        .iter()
         .map(|(id, rank)| {
             // The only counting in this stage; without it the bar sits still.
             progress.item();
-            (id, rank, facts.attr_bytes.get(&id).copied().unwrap_or(0))
+            (id, rank, facts.attr_bytes.get(id).unwrap_or(0))
         })
         .collect();
-    listed.sort_unstable();
+    drop(ranks);
     timed(Spent::Ranks, listed.len() * 16, || store.put_ranks(&listed))?;
 
     progress.say(&format!(

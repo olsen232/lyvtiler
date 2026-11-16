@@ -39,7 +39,7 @@ fn every_feature_is_ranked_exactly_once() {
             ranker.name()
         );
 
-        let mut seen: Vec<u32> = ranks.values().copied().collect();
+        let mut seen: Vec<u32> = ranks.values().collect();
         seen.sort_unstable();
         assert_eq!(
             seen,
@@ -105,7 +105,7 @@ fn evenstar_takes_one_feature_from_every_tile_before_any_tile_gets_two() {
 
     let ranks = Evenstar.rank(&layer);
     let first_round: Vec<u64> = (0..6)
-        .map(|r| *ranks.iter().find(|&(_, &v)| v == r).unwrap().0)
+        .map(|r| ranks.iter().find(|&(_, v)| v == r).unwrap().0)
         .collect();
 
     // Six tiles: the first six ranks are one from each.
@@ -156,7 +156,10 @@ fn the_more_tiles_a_feature_spans_the_better_it_ranks() {
     let means: Vec<(u32, f64)> = wide
         .iter()
         .map(|(span, ids)| {
-            let total: u64 = ids.iter().map(|id| u64::from(ranks[id])).sum();
+            let total: u64 = ids
+                .iter()
+                .map(|id| u64::from(ranks.get(*id).unwrap()))
+                .sum();
             (*span, total as f64 / ids.len() as f64)
         })
         .collect();
@@ -191,7 +194,10 @@ fn head_share(tiles: u32, wanted: u64, contest: &[(u64, Size)]) -> f64 {
                 .iter()
                 .map(|(id, _)| id + u64::from(*t) * 10)
                 .collect();
-            let best = mine.iter().min_by_key(|id| ranks[id]).unwrap();
+            let best = mine
+                .iter()
+                .min_by_key(|id| ranks.get(**id).unwrap())
+                .unwrap();
             *best == wanted + u64::from(*t) * 10
         })
         .count();
@@ -260,7 +266,7 @@ fn the_tile_order_does_not_depend_on_which_other_tiles_exist() {
             layer.add(tile(t, 0), u64::from(t), Size::polygon(1.0));
         }
         let ranks = Evenstar.rank(&layer);
-        let mut by_rank: Vec<(u32, u32)> = ranks.iter().map(|(id, r)| (*r, *id as u32)).collect();
+        let mut by_rank: Vec<(u32, u32)> = ranks.iter().map(|(id, r)| (r, id as u32)).collect();
         by_rank.sort_unstable();
         by_rank.into_iter().map(|(_, id)| id).collect()
     };

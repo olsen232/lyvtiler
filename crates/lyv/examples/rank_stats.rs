@@ -106,7 +106,10 @@ fn main() -> Result<()> {
             let mut per_tile: BTreeMap<TileCoord, usize> = BTreeMap::new();
             let mut per_cell: BTreeMap<(u32, u32), usize> = BTreeMap::new();
             for (coord, ids) in &in_tile {
-                let kept = ids.iter().filter(|id| ranks[id] < keep).count();
+                let kept = ids
+                    .iter()
+                    .filter(|id| ranks.get(**id).is_some_and(|rank| rank < keep))
+                    .count();
                 per_tile.insert(*coord, kept);
                 let shift = maxzoom - coarse;
                 *per_cell

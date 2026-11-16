@@ -154,10 +154,10 @@ pub fn of_pieces(pieces: &lyv_core::Pieces) -> Item {
 /// What the ranking's buckets cost. The layer supplies counts; the arithmetic
 /// stays here.
 pub fn of_layer(layer: &lyv_rank::Layer) -> Item {
-    let (buckets, ids, id_capacity, sizes) = layer.footprint();
+    let (buckets, ids, id_capacity, sizes, size_bytes) = layer.footprint();
     let bytes = btree_map_bytes::<lyv_core::TileCoord, Vec<u64>>(buckets)
         + vec_bytes::<u64>(id_capacity)
-        + hash_map_bytes::<u64, lyv_rank::Size>(sizes);
+        + size_bytes;
     Item::new(
         "layer",
         bytes,
@@ -172,11 +172,11 @@ pub fn of_layer(layer: &lyv_rank::Layer) -> Item {
 }
 
 /// What the per-feature facts cost.
-pub fn of_facts(attr_bytes: usize) -> Item {
+pub fn of_facts(attr_bytes: &lyv_core::PerFeature<u32>) -> Item {
     Item::new(
         "facts",
-        hash_map_bytes::<u64, u32>(attr_bytes),
-        format!("{} attribute costs", thousands(attr_bytes)),
+        attr_bytes.bytes(),
+        format!("{} attribute costs", thousands(attr_bytes.len())),
     )
 }
 
