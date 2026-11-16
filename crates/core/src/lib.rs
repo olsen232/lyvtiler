@@ -2,6 +2,9 @@
 //! values — and Web Mercator. Depends only on `geo-types`.
 
 pub mod mercator;
+pub mod per_feature;
+
+pub use per_feature::PerFeature;
 
 use std::collections::BTreeMap;
 
