@@ -1346,13 +1346,17 @@ const MAX_LEAD: u32 = 3;
 /// Each level is built in memory, measured, thinned, encoded and stored, then
 /// handed straight to the next iteration as its children — never read back.
 /// Merging runs per parent across every core; the grouping is one serial pass.
+///
+/// Returns the features thinned out of maxzoom. Each level above keeps a
+/// prefix of maxzoom's, so these are in no tile at all and encoding needn't
+/// load their attributes.
 pub fn merge_up(
     store: &mut dyn TileStore,
     options: &Options,
     maxzoom_worst: lyv_rank::Worst,
     mut children: Pieces,
     progress: &Progress,
-) -> Result<()> {
+) -> Result<lyv_core::PerFeature<()>> {
     progress.stage("ranks", None);
     let ranks = load_ranks(store)?;
     // The keep-count: narrowed up the climb, never widened. Maxzoom itself is
@@ -1391,6 +1395,13 @@ pub fn merge_up(
             maxzoom_worst.features,
         ));
         cutoff = narrowed;
+    }
+    // A set, so about a bit per id while the ids are dense.
+    let mut unserved = lyv_core::PerFeature::new();
+    for (id, (rank, _)) in ranks.iter() {
+        if rank >= cutoff {
+            unserved.insert(id, ());
+        }
     }
 
     // How many levels ahead the climb simplifies. Raised when a level comes out
@@ -1498,7 +1509,7 @@ pub fn merge_up(
         // keeps the bar moving (one estimate at the start was 16% out).
         progress.expect_more(children.len() as u64);
     }
-    Ok(())
+    Ok(unserved)
 }
 
 /// One finished parent, held until the level's keep-count is known: the bytes
@@ -1638,10 +1649,14 @@ fn merge_level_in_parallel(
 ///
 /// Reads each tile's eight neighbours: the one pass that isn't local to a
 /// tile. With `buffer == 0`, tiles pass through and no neighbour is read.
+///
+/// `unserved` is what [`merge_up`] returns: features in no tile, whose
+/// attributes aren't loaded.
 pub fn encode(
     store: &mut dyn TileStore,
     options: &Options,
     writer: &mut dyn lyv_archive::TileWriter,
+    unserved: &lyv_core::PerFeature<()>,
     progress: &Progress,
 ) -> Result<()> {
     let batch_size = writer.batch_size();
@@ -1652,7 +1667,7 @@ pub fn encode(
     // Once, before the first level. Its own stage, or its seconds get booked
     // to whatever stage is open.
     progress.stage("attributes", None);
-    let attributes = timed(Spent::ReadFeatures, 0, || load_attributes(store))?;
+    let attributes = timed(Spent::ReadFeatures, 0, || load_attributes(store, unserved))?;
 
     progress.stage("encoding", Some("tiles"));
     let all = store.count()?;
@@ -1745,21 +1760,44 @@ impl lyv_core::Attributes for Loaded {
     }
 }
 
-/// Read the whole attribute table into memory, as stored.
-fn load_attributes(store: &dyn TileStore) -> Result<Loaded> {
-    let mut loaded = Loaded {
-        schema: store.schema().clone(),
-        ..Loaded::default()
-    };
+/// Read the attribute table into memory, as stored, leaving out the features
+/// in no tile.
+///
+/// Two passes: the first sizes the rows and spans, so the second fills them
+/// without regrowing. Grown by doubling instead, the rows' spare capacity set
+/// the run's peak: 0.7 GB over a 7.9 GB table on 59.9M features, where a pass
+/// takes about 11 s.
+fn load_attributes(store: &dyn TileStore, unserved: &lyv_core::PerFeature<()>) -> Result<Loaded> {
+    let mut bytes = 0usize;
+    let mut ids: Option<(u64, u64)> = None;
     store.for_each_feature(&mut |id, row| {
-        loaded
-            .spans
-            .insert(id, (loaded.rows.len() as u64, row.len() as u32));
-        loaded.rows.extend_from_slice(row);
+        if !unserved.contains(id) {
+            bytes += row.len();
+            ids = Some(ids.map_or((id, id), |(lo, hi)| (lo.min(id), hi.max(id))));
+        }
         Ok(())
     })?;
-    // Grown by doubling while reading, so up to half of it is spare.
-    loaded.rows.shrink_to_fit();
+
+    let mut loaded = Loaded {
+        schema: store.schema().clone(),
+        rows: Vec::with_capacity(bytes),
+        spans: lyv_core::PerFeature::new(),
+    };
+    if let Some((lo, hi)) = ids {
+        loaded
+            .spans
+            .reserve(usize::try_from(hi - lo + 1).unwrap_or(usize::MAX));
+    }
+    store.for_each_feature(&mut |id, row| {
+        if !unserved.contains(id) {
+            loaded
+                .spans
+                .insert(id, (loaded.rows.len() as u64, row.len() as u32));
+            loaded.rows.extend_from_slice(row);
+        }
+        Ok(())
+    })?;
+    // Only a map needs it: an array was sized exactly.
     loaded.spans.shrink();
     Ok(loaded)
 }
@@ -2542,7 +2580,7 @@ fn build(
     // `ingest` may choose the maxzoom; later stages get the settled options.
     let ingested = ingest(&mut store, options, progress)?;
     let options = &options.with_max_zoom(ingested.max_zoom);
-    merge_up(
+    let unserved = merge_up(
         &mut store,
         options,
         ingested.worst,
@@ -2550,12 +2588,12 @@ fn build(
         progress,
     )?;
     match writer {
-        Some(writer) => encode(&mut store, options, writer, progress)?,
+        Some(writer) => encode(&mut store, options, writer, &unserved, progress)?,
         None => {
             // Opened before encoding, which writes straight into it. A failed
             // run leaves a partial archive.
             let mut writer = open_archive(ingested.fields, ingested.bounds, options)?;
-            encode(&mut store, options, writer.as_mut(), progress)?;
+            encode(&mut store, options, writer.as_mut(), &unserved, progress)?;
             progress.stage("closing", None);
             writer.finish()?;
         }

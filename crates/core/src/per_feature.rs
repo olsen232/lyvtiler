@@ -83,6 +83,19 @@ impl<T: Copy + Default> PerFeature<T> {
         }
     }
 
+    /// Room for `span` consecutive ids from the first one inserted, so filling
+    /// them never regrows the array: growing doubles, and holds both copies
+    /// while it moves. No effect once the ids have gone sparse.
+    pub fn reserve(&mut self, span: usize) {
+        if let Repr::Dense {
+            values, present, ..
+        } = &mut self.repr
+        {
+            values.reserve_exact(span.saturating_sub(values.len()));
+            present.reserve_exact((span / 64 + 1).saturating_sub(present.len()));
+        }
+    }
+
     /// Whether `id` belongs in the array: at or past its base, and not so far
     /// past what's held that the gap would cost more than a map. An empty
     /// array takes `id` as its base.
